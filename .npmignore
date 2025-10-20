@@ -1,0 +1,35 @@
+# 构建产物
+build/
+*.node
+
+# 调试文件
+*.log
+*.pdb
+*.iobj
+*.ipdb
+
+# 临时文件
+temp-*/
+output/
+examples/output/
+
+# 开发文件
+.vscode/
+.vs/
+*.code-workspace
+
+# Git
+.git/
+.gitignore
+
+# 测试文件
+test/
+
+# 文档（可选，根据需要保留）
+*.md
+!README.md
+!README.zh-CN.md
+!LICENSE
+
+# 依赖
+node_modules/

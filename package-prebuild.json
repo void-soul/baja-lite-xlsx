@@ -1,0 +1,64 @@
+{
+  "name": "baja-lite-xlsx",
+  "version": "1.0.0",
+  "description": "A native Node.js module for reading Excel files and extracting images using xlnt library",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "install": "prebuild-install --runtime napi || node-gyp rebuild",
+    "build": "node-gyp rebuild",
+    "build:dev": "node-gyp rebuild && npm run copy-dlls:dev",
+    "copy-dlls:dev": "node -e \"const fs=require('fs'); const path=require('path'); const src='E:/vcpkg/installed/x64-windows/bin'; const dest='./build/Release'; if(fs.existsSync(src) && fs.existsSync(dest)){fs.readdirSync(src).filter(f=>f.endsWith('.dll')).forEach(f=>fs.copyFileSync(path.join(src,f),path.join(dest,f)));console.log('✓ DLLs copied');}\"",
+    "prebuild": "prebuild --runtime napi --target 8 --strip",
+    "prebuild:upload": "prebuild --upload-all ${GITHUB_TOKEN}",
+    "clean": "node-gyp clean",
+    "test": "node test/test.js",
+    "example": "node examples/basic.js",
+    "example:json": "node examples/json-api.js",
+    "example:advanced": "node examples/advanced.js"
+  },
+  "keywords": [
+    "excel",
+    "xlsx",
+    "native",
+    "addon",
+    "xlnt",
+    "image",
+    "extraction",
+    "spreadsheet",
+    "workbook",
+    "node-addon-api",
+    "napi"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/baja-lite-xlsx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/baja-lite-xlsx/issues"
+  },
+  "homepage": "https://github.com/yourusername/baja-lite-xlsx#readme",
+  "gypfile": true,
+  "binary": {
+    "napi_versions": [3, 4, 5, 6, 7, 8]
+  },
+  "dependencies": {
+    "node-addon-api": "^8.0.0",
+    "prebuild-install": "^7.1.1"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.0.0",
+    "prebuild": "^12.1.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "os": [
+    "win32",
+    "linux",
+    "darwin"
+  ]
+}
+

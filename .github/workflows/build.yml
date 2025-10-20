@@ -1,0 +1,105 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [16.x, 18.x, 20.x]
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ matrix.node-version }}
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake libzip-dev
+    
+    - name: Install xlnt
+      run: |
+        git clone https://github.com/tfussell/xlnt.git /tmp/xlnt
+        cd /tmp/xlnt
+        mkdir build && cd build
+        cmake ..
+        make -j$(nproc)
+        sudo make install
+        sudo ldconfig
+    
+    - name: Install npm dependencies
+      run: npm install
+    
+    - name: Build native module
+      run: npm run build
+
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        node-version: [16.x, 18.x, 20.x]
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ matrix.node-version }}
+    
+    - name: Install system dependencies
+      run: |
+        brew install xlnt libzip
+    
+    - name: Install npm dependencies
+      run: npm install
+    
+    - name: Build native module
+      run: npm run build
+
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        node-version: [16.x, 18.x, 20.x]
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ matrix.node-version }}
+    
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: 'master'
+    
+    - name: Install dependencies with vcpkg
+      run: |
+        vcpkg install xlnt:x64-windows
+        vcpkg install libzip:x64-windows
+        vcpkg integrate install
+    
+    - name: Update binding.gyp for CI
+      run: |
+        $vcpkgRoot = $env:VCPKG_ROOT
+        (Get-Content binding.gyp) -replace 'C:/vcpkg', $vcpkgRoot | Set-Content binding.gyp
+    
+    - name: Install npm dependencies
+      run: npm install
+    
+    - name: Build native module
+      run: npm run build
+
+
