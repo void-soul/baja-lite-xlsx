@@ -1,4 +1,4 @@
-name: Prebuild Native Module (Windows Only)
+name: Prebuild Native Module (Multi-Platform)
 
 on:
   push:
@@ -7,33 +7,60 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-windows:
-    name: Build Windows x64 - Node 20
-    runs-on: windows-latest
+  build:
+    name: Build ${{ matrix.os }} - Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [16, 18, 20]
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Setup Node.js 20
+      - name: Setup Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
       
-      - name: Install vcpkg
+      # Windows: Install dependencies via vcpkg
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
         run: |
           git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
           cd C:\vcpkg
           .\bootstrap-vcpkg.bat
           .\vcpkg install xlnt:x64-windows
-        shell: powershell
-      
-      - name: Set environment variables
-        run: |
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
         shell: powershell
       
-      - name: Install dependencies
+      # Linux: Install dependencies via apt
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libxlnt-dev || true
+          # If libxlnt-dev not available, build from source
+          if ! dpkg -l | grep -q libxlnt-dev; then
+            git clone https://github.com/tfussell/xlnt.git /tmp/xlnt
+            cd /tmp/xlnt
+            mkdir build && cd build
+            cmake ..
+            make -j$(nproc)
+            sudo make install
+            sudo ldconfig
+          fi
+      
+      # macOS: Install dependencies via Homebrew
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install xlnt || brew link xlnt
+      
+      - name: Install npm dependencies
         run: npm install --ignore-scripts
       
       - name: Build native module
@@ -42,21 +69,28 @@ jobs:
       - name: Create prebuild package
         run: npx prebuild --runtime napi --target 8 --strip
       
-      - name: List generated files
+      - name: List generated files (Windows)
+        if: runner.os == 'Windows'
         run: |
           Write-Host "Generated prebuild files:"
           Get-ChildItem prebuilds -Recurse | Format-Table Name, Length
         shell: powershell
       
+      - name: List generated files (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          echo "Generated prebuild files:"
+          find prebuilds -type f -exec ls -lh {} \;
+      
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: prebuilds-windows-x64-node20
+          name: prebuilds-${{ matrix.os }}-node${{ matrix.node }}
           path: prebuilds/
 
   release:
     name: Create Release
-    needs: [build-windows]
+    needs: [build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     
@@ -64,15 +98,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Download prebuild artifacts
+      # Download all artifacts from all build jobs
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: prebuilds-windows-x64-node20
-          path: prebuilds
+          path: all-prebuilds
       
-      - name: List files to be released
+      # Merge all prebuilds into one directory
+      - name: Merge prebuilds
         run: |
-          echo "Files to be released:"
+          mkdir -p prebuilds
+          find all-prebuilds -type f -name "*.tar.gz" -exec cp {} prebuilds/ \;
+          echo "Merged prebuild files:"
           ls -lah prebuilds/
       
       - name: Create Release
@@ -82,22 +119,51 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            ## 预编译包说明
+            ## 📦 预编译包说明
             
-            此版本包含 Windows x64 平台的预编译包，适用于 Node.js v20+。
+            此版本包含多平台预编译包，支持以下环境：
             
-            ### 支持的平台
-            - ✅ Windows x64 (Node.js >= 20)
+            ### ✅ 支持的平台
             
-            ### 不支持的平台
-            其他平台（Linux、macOS）或其他 Node.js 版本的用户安装时会自动回退到源码编译。
+            | 平台 | 架构 | Node.js 版本 | 状态 |
+            |------|------|--------------|------|
+            | **Windows** | x64 | 16, 18, 20 | ✅ |
+            | **Linux** | x64 | 16, 18, 20 | ✅ |
+            | **macOS** | x64/arm64 | 16, 18, 20 | ✅ |
             
-            ### 安装
+            ### 📥 安装
+            
             ```bash
             npm install baja-lite-xlsx
             ```
             
-            Windows + Node 20 用户将自动下载预编译包，无需编译环境。
+            **自动下载预编译包：**
+            - ✅ Windows x64 (Node 16/18/20)
+            - ✅ Linux x64 (Node 16/18/20)
+            - ✅ macOS (Node 16/18/20)
+            
+            ### 🔧 源码编译（备用方案）
+            
+            如果您的平台不在上述列表中，安装时会自动回退到源码编译。
+            
+            **Windows 编译要求：**
+            - Visual Studio 2019+ 或 Build Tools
+            - vcpkg + xlnt
+            
+            **Linux 编译要求：**
+            - build-essential
+            - libxlnt-dev 或从源码构建
+            
+            **macOS 编译要求：**
+            - Xcode Command Line Tools
+            - Homebrew + xlnt
+            
+            ### 📚 文档
+            
+            查看 [README.md](https://github.com/void-soul/baja-lite-xlsx#readme) 获取完整文档和示例。
+            
+            ### 🐛 问题反馈
+            
+            如遇到问题，请提交 [Issue](https://github.com/void-soul/baja-lite-xlsx/issues)。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
