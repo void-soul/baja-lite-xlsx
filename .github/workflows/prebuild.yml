@@ -64,7 +64,7 @@ jobs:
         run: npm install --ignore-scripts
         env:
           VCPKG_ROOT: C:\vcpkg
-      
+
       - name: Build native module
         run: npm run build
         env:
