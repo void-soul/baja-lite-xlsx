@@ -1,5 +1,7 @@
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const crypto = require('crypto');
 
 // Try to load the native addon
 let addon;
@@ -14,6 +16,78 @@ try {
       'Make sure you have installed xlnt library via vcpkg or system package manager.'
     );
   }
+}
+
+/**
+ * 处理不同类型的输入，统一转换为文件路径
+ * @param {string|Buffer} input - 文件路径、Buffer 或 base64 字符串
+ * @returns {{filepath: string, cleanup: function}} 文件路径和清理函数
+ * @private
+ */
+function prepareFilePath(input) {
+  // 情况1: Buffer
+  if (Buffer.isBuffer(input)) {
+    // 创建临时文件
+    const tempDir = os.tmpdir();
+    const tempFile = path.join(tempDir, `excel-${crypto.randomBytes(16).toString('hex')}.xlsx`);
+    
+    fs.writeFileSync(tempFile, input);
+    
+    return {
+      filepath: tempFile,
+      cleanup: () => {
+        try {
+          fs.unlinkSync(tempFile);
+        } catch (err) {
+          // 忽略删除错误
+        }
+      }
+    };
+  }
+  
+  // 情况2: 字符串
+  if (typeof input === 'string') {
+    // 检查是否是 base64
+    // base64 特征：很长的字符串（>500），只包含 base64 字符，且包含常见的文件头（如 UEs/PK）
+    const isBase64 = input.length > 500 &&
+                     /^[A-Za-z0-9+/=\s]+$/.test(input) &&
+                     (input.startsWith('UEs') || input.startsWith('PK') || 
+                      input.includes('AAAA') || input.includes('////'));
+    
+    if (isBase64) {
+      // base64 字符串，转换为 Buffer 然后写入临时文件
+      const buffer = Buffer.from(input, 'base64');
+      const tempDir = os.tmpdir();
+      const tempFile = path.join(tempDir, `excel-${crypto.randomBytes(16).toString('hex')}.xlsx`);
+      
+      fs.writeFileSync(tempFile, buffer);
+      
+      return {
+        filepath: tempFile,
+        cleanup: () => {
+          try {
+            fs.unlinkSync(tempFile);
+          } catch (err) {
+            // 忽略删除错误
+          }
+        }
+      };
+    } else {
+      // 文件路径
+      const absolutePath = path.isAbsolute(input) ? input : path.resolve(input);
+      
+      if (!fs.existsSync(absolutePath)) {
+        throw new Error(`File not found: ${absolutePath}`);
+      }
+      
+      return {
+        filepath: absolutePath,
+        cleanup: () => {} // 不需要清理
+      };
+    }
+  }
+  
+  throw new Error('Input must be a file path (string), Buffer, or base64 string');
 }
 
 /**
@@ -60,27 +134,39 @@ function extractImages(filepath) {
 
 /**
  * 获取Excel文件中所有Sheet的名称
- * @param {string} filepath - Excel文件路径
+ * @param {string|Buffer} input - Excel文件路径、Buffer 或 base64 字符串
  * @returns {string[]} Sheet名称数组
+ * 
+ * @example
+ * // 使用文件路径
+ * const names1 = getSheetNames('./sample.xlsx');
+ * 
+ * // 使用 Buffer
+ * const buffer = fs.readFileSync('./sample.xlsx');
+ * const names2 = getSheetNames(buffer);
+ * 
+ * // 使用 base64
+ * const base64 = fs.readFileSync('./sample.xlsx').toString('base64');
+ * const names3 = getSheetNames(base64);
  */
-function getSheetNames(filepath) {
-  if (!filepath) {
-    throw new Error('文件路径不能为空');
+function getSheetNames(input) {
+  if (!input) {
+    throw new Error('Input is required (filepath, Buffer, or base64 string)');
   }
   
-  const absolutePath = path.isAbsolute(filepath) ? filepath : path.resolve(filepath);
+  const { filepath, cleanup } = prepareFilePath(input);
   
-  if (!fs.existsSync(absolutePath)) {
-    throw new Error(`文件不存在: ${absolutePath}`);
+  try {
+    const data = addon.readExcel(filepath);
+    return data.sheets.map(sheet => sheet.name);
+  } finally {
+    cleanup();
   }
-  
-  const data = addon.readExcel(absolutePath);
-  return data.sheets.map(sheet => sheet.name);
 }
 
 /**
  * 读取Excel表格并返回JSON数组
- * @param {string} filepath - Excel文件路径
+ * @param {string|Buffer} input - Excel文件路径、Buffer 或 base64 字符串
  * @param {Object} options - 配置选项
  * @param {string} [options.sheetName] - 指定Sheet名称，不传则读取第一个Sheet
  * @param {number} [options.headerRow=0] - 表头所在行索引（从0开始）
@@ -89,7 +175,8 @@ function getSheetNames(filepath) {
  * @returns {Array<Object>} JSON数组，每个元素代表一行数据
  * 
  * @example
- * const data = readTableAsJSON('./sample.xlsx', {
+ * // 使用文件路径
+ * const data1 = readTableAsJSON('./sample.xlsx', {
  *   sheetName: 'Sheet1',
  *   headerRow: 0,
  *   skipRows: [1, 2],
@@ -98,28 +185,33 @@ function getSheetNames(filepath) {
  *     '年龄': 'age'
  *   }
  * });
+ * 
+ * // 使用 Buffer
+ * const buffer = fs.readFileSync('./sample.xlsx');
+ * const data2 = readTableAsJSON(buffer, { headerRow: 0 });
+ * 
+ * // 使用 base64
+ * const base64 = buffer.toString('base64');
+ * const data3 = readTableAsJSON(base64, { headerRow: 0 });
  */
-function readTableAsJSON(filepath, options = {}) {
-  if (!filepath) {
-    throw new Error('文件路径不能为空');
+function readTableAsJSON(input, options = {}) {
+  if (!input) {
+    throw new Error('Input is required (filepath, Buffer, or base64 string)');
   }
   
-  const absolutePath = path.isAbsolute(filepath) ? filepath : path.resolve(filepath);
+  const { filepath, cleanup } = prepareFilePath(input);
   
-  if (!fs.existsSync(absolutePath)) {
-    throw new Error(`文件不存在: ${absolutePath}`);
-  }
-  
-  // 默认选项
-  const {
-    sheetName = null,
-    headerRow = 0,
-    skipRows = [],
-    headerMap = {}
-  } = options;
-  
-  // 读取Excel数据
-  const excelData = addon.readExcel(absolutePath);
+  try {
+    // 默认选项
+    const {
+      sheetName = null,
+      headerRow = 0,
+      skipRows = [],
+      headerMap = {}
+    } = options;
+    
+    // 读取Excel数据
+    const excelData = addon.readExcel(filepath);
   
   // 选择目标Sheet
   let targetSheet;
@@ -227,6 +319,9 @@ function readTableAsJSON(filepath, options = {}) {
   }
   
   return result;
+  } finally {
+    cleanup();
+  }
 }
 
 /**
@@ -303,30 +398,12 @@ function findImagesForRow(images, imagePositions, sheetName, rowNumber) {
   return rowImages;
 }
 
-/**
- * 读取表格为JSON（别名，更简洁）
- */
-function 读取表格(filepath, options) {
-  return readTableAsJSON(filepath, options);
-}
-
-/**
- * 读取表格Sheet名称（别名）
- */
-function 读取表格SheetName(filepath) {
-  return getSheetNames(filepath);
-}
-
 module.exports = {
   // 原始API
   readExcel,
   extractImages,
   
-  // 新增高级API（英文）
+  // 高级API
   readTableAsJSON,
-  getSheetNames,
-  
-  // 新增高级API（中文别名）
-  读取表格,
-  读取表格SheetName
+  getSheetNames
 };

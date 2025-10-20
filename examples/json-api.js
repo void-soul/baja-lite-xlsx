@@ -3,7 +3,7 @@
  * 演示如何使用新的高级API读取Excel并返回JSON数组
  */
 
-const { readTableAsJSON, getSheetNames, 读取表格, 读取表格SheetName } = require('../index');
+const { readTableAsJSON, getSheetNames } = require('../index');
 const fs = require('fs');
 const path = require('path');
 
@@ -38,11 +38,6 @@ try {
   
   const sheetNames = getSheetNames(excelFile);
   console.log('Sheet名称列表:', sheetNames);
-  console.log('');
-  
-  // 使用中文别名
-  const sheetNames2 = 读取表格SheetName(excelFile);
-  console.log('使用中文API:', sheetNames2);
   console.log('\n' + '='.repeat(50) + '\n');
   
   // ========================================
@@ -154,25 +149,40 @@ try {
   console.log('\n' + '='.repeat(50) + '\n');
   
   // ========================================
-  // 示例 6: 使用中文API
+  // 示例 6: 使用 Buffer 读取
   // ========================================
-  console.log('【示例 6】使用中文API别名\n');
+  console.log('【示例 6】使用 Buffer 读取\n');
   
-  const data5 = 读取表格(excelFile, {
+  const fileBuffer = fs.readFileSync(excelFile);
+  const data5 = readTableAsJSON(fileBuffer, {
     headerMap: {
       '名称': 'name',
       '年龄': 'age'
     }
   });
   
-  console.log('使用中文API读取:');
+  console.log('使用 Buffer 读取:');
   console.log(`共 ${data5.length} 行数据`);
   console.log('\n' + '='.repeat(50) + '\n');
   
   // ========================================
-  // 示例 7: 处理多列图片
+  // 示例 7: 使用 base64 读取
   // ========================================
-  console.log('【示例 7】处理多列图片\n');
+  console.log('【示例 7】使用 base64 读取\n');
+  
+  const base64String = fileBuffer.toString('base64');
+  const data6 = readTableAsJSON(base64String, {
+    headerRow: 0
+  });
+  
+  console.log('使用 base64 字符串读取:');
+  console.log(`共 ${data6.length} 行数据`);
+  console.log('\n' + '='.repeat(50) + '\n');
+  
+  // ========================================
+  // 示例 8: 处理多列图片
+  // ========================================
+  console.log('【示例 8】处理多列图片\n');
   console.log('提示：如果Excel有多个图片列（如photo1, photo2），图片会自动添加到对应列名的属性中');
   console.log('');
   console.log('示例数据结构:');

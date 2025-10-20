@@ -143,18 +143,28 @@ declare module 'baja-lite-xlsx' {
    * Get all sheet names from Excel file
    * 获取Excel文件中所有Sheet的名称
    * 
-   * @param filepath - Path to the .xlsx file
+   * @param input - Excel file path (string), Buffer, or base64 string
    * @returns Array of sheet names
    * @throws {Error} If file not found or cannot be read
    * 
    * @example
    * ```javascript
    * const { getSheetNames } = require('baja-lite-xlsx');
-   * const names = getSheetNames('./sample.xlsx');
-   * console.log(names); // ['Sheet1', 'Sheet2']
+   * 
+   * // Using file path
+   * const names1 = getSheetNames('./sample.xlsx');
+   * console.log(names1); // ['Sheet1', 'Sheet2']
+   * 
+   * // Using Buffer
+   * const buffer = fs.readFileSync('./sample.xlsx');
+   * const names2 = getSheetNames(buffer);
+   * 
+   * // Using base64
+   * const base64 = buffer.toString('base64');
+   * const names3 = getSheetNames(base64);
    * ```
    */
-  export function getSheetNames(filepath: string): string[];
+  export function getSheetNames(input: string | Buffer): string[];
 
   /**
    * Read Excel table and return as JSON array
@@ -170,7 +180,7 @@ declare module 'baja-lite-xlsx' {
    * - 内嵌图片：使用图所在单元格的列和行（from.col, from.row）
    * - 图片属性名由该列的表头决定
    * 
-   * @param filepath - Path to the .xlsx file
+   * @param input - Excel file path (string), Buffer, or base64 string
    * @param options - Configuration options
    * @returns Array of objects, each representing a row
    * @throws {Error} If file not found or sheet not found
@@ -178,13 +188,15 @@ declare module 'baja-lite-xlsx' {
    * @example
    * ```javascript
    * const { readTableAsJSON } = require('baja-lite-xlsx');
+   * const fs = require('fs');
    * 
    * // Excel表格:
    * // | 名称  | 年龄 | photo1 | photo2 |
    * // | 张三  | 25   | [图片] |        |
    * // | 李四  | 30   |        | [图片] |
    * 
-   * const data = readTableAsJSON('./sample.xlsx', {
+   * // Using file path
+   * const data1 = readTableAsJSON('./sample.xlsx', {
    *   sheetName: 'Sheet1',
    *   headerRow: 0,
    *   headerMap: {
@@ -192,6 +204,14 @@ declare module 'baja-lite-xlsx' {
    *     '年龄': 'age'
    *   }
    * });
+   * 
+   * // Using Buffer
+   * const buffer = fs.readFileSync('./sample.xlsx');
+   * const data2 = readTableAsJSON(buffer, { headerRow: 0 });
+   * 
+   * // Using base64
+   * const base64 = buffer.toString('base64');
+   * const data3 = readTableAsJSON(base64, { headerRow: 0 });
    * 
    * // 结果:
    * // [
@@ -209,22 +229,8 @@ declare module 'baja-lite-xlsx' {
    * ```
    */
   export function readTableAsJSON(
-    filepath: string,
+    input: string | Buffer,
     options?: ReadTableOptions
   ): Array<Record<string, any>>;
 
-  /**
-   * 读取表格（中文别名）
-   * Alias for readTableAsJSON
-   */
-  export function 读取表格(
-    filepath: string,
-    options?: ReadTableOptions
-  ): Array<Record<string, any>>;
-
-  /**
-   * 读取表格SheetName（中文别名）
-   * Alias for getSheetNames
-   */
-  export function 读取表格SheetName(filepath: string): string[];
 }
