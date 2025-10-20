@@ -1,4 +1,4 @@
-name: Prebuild Native Module
+name: Prebuild Native Module (Windows Only)
 
 on:
   push:
@@ -8,20 +8,17 @@ on:
 
 jobs:
   build-windows:
-    name: Build Windows
+    name: Build Windows x64 - Node 20
     runs-on: windows-latest
-    strategy:
-      matrix:
-        node: [16, 18, 20]
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      - name: Setup Node.js ${{ matrix.node }}
+      - name: Setup Node.js 20
         uses: actions/setup-node@v3
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '20'
       
       - name: Install vcpkg
         run: |
@@ -39,113 +36,27 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts
       
-      - name: Build
+      - name: Build native module
         run: npm run build
       
-      - name: Create prebuild
-        run: npx prebuild --runtime napi --target 8
+      - name: Create prebuild package
+        run: npx prebuild --runtime napi --target 8 --strip
+      
+      - name: List generated files
+        run: |
+          Write-Host "Generated prebuild files:"
+          Get-ChildItem prebuilds -Recurse | Format-Table Name, Length
+        shell: powershell
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: prebuilds-windows-node${{ matrix.node }}
-          path: prebuilds/
-
-  build-linux:
-    name: Build Linux
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node: [16, 18, 20]
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Setup Node.js ${{ matrix.node }}
-        uses: actions/setup-node@v3
-        with:
-          node-version: ${{ matrix.node }}
-      
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake git libz-dev
-      
-      - name: Install vcpkg and xlnt
-        run: |
-          cd /opt
-          sudo git clone https://github.com/Microsoft/vcpkg.git
-          cd vcpkg
-          sudo ./bootstrap-vcpkg.sh
-          sudo ./vcpkg install xlnt
-      
-      - name: Set environment variables
-        run: echo "VCPKG_ROOT=/opt/vcpkg" >> $GITHUB_ENV
-      
-      - name: Install dependencies
-        run: npm install --ignore-scripts
-      
-      - name: Build
-        run: npm run build
-      
-      - name: Create prebuild
-        run: npx prebuild --runtime napi --target 8
-      
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: prebuilds-linux-node${{ matrix.node }}
-          path: prebuilds/
-
-  build-macos:
-    name: Build macOS
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        node: [16, 18, 20]
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Setup Node.js ${{ matrix.node }}
-        uses: actions/setup-node@v3
-        with:
-          node-version: ${{ matrix.node }}
-      
-      - name: Install system dependencies
-        run: brew install cmake
-      
-      - name: Install vcpkg and xlnt
-        run: |
-          cd $HOME
-          git clone https://github.com/Microsoft/vcpkg.git
-          cd vcpkg
-          ./bootstrap-vcpkg.sh
-          ./vcpkg install xlnt
-      
-      - name: Set environment variables
-        run: echo "VCPKG_ROOT=$HOME/vcpkg" >> $GITHUB_ENV
-      
-      - name: Install dependencies
-        run: npm install --ignore-scripts
-      
-      - name: Build
-        run: npm run build
-      
-      - name: Create prebuild
-        run: npx prebuild --runtime napi --target 8
-      
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: prebuilds-macos-node${{ matrix.node }}
+          name: prebuilds-windows-x64-node20
           path: prebuilds/
 
   release:
     name: Create Release
-    needs: [build-windows, build-linux, build-macos]
+    needs: [build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     
@@ -153,16 +64,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      - name: Download all artifacts
+      - name: Download prebuild artifacts
         uses: actions/download-artifact@v3
         with:
-          path: prebuilds-all
+          name: prebuilds-windows-x64-node20
+          path: prebuilds
       
-      - name: Merge prebuilds
+      - name: List files to be released
         run: |
-          mkdir -p prebuilds
-          cp prebuilds-all/*/* prebuilds/
-          ls -la prebuilds/
+          echo "Files to be released:"
+          ls -lah prebuilds/
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -170,6 +81,23 @@ jobs:
           files: prebuilds/*
           draft: false
           prerelease: false
+          body: |
+            ## 预编译包说明
+            
+            此版本包含 Windows x64 平台的预编译包，适用于 Node.js v20+。
+            
+            ### 支持的平台
+            - ✅ Windows x64 (Node.js >= 20)
+            
+            ### 不支持的平台
+            其他平台（Linux、macOS）或其他 Node.js 版本的用户安装时会自动回退到源码编译。
+            
+            ### 安装
+            ```bash
+            npm install baja-lite-xlsx
+            ```
+            
+            Windows + Node 20 用户将自动下载预编译包，无需编译环境。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
