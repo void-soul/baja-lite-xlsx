@@ -33,11 +33,11 @@
               }
             },
             "include_dirs": [
-              "E:/vcpkg/installed/x64-windows/include"
+              "<!(echo %VCPKG_ROOT%)/installed/x64-windows/include"
             ],
             "libraries": [
-              "E:/vcpkg/installed/x64-windows/lib/xlnt.lib",
-              "E:/vcpkg/installed/x64-windows/lib/zip.lib"
+              "<!(echo %VCPKG_ROOT%)/installed/x64-windows/lib/xlnt.lib",
+              "<!(echo %VCPKG_ROOT%)/installed/x64-windows/lib/zip.lib"
             ]
           }
         ],
