@@ -8,22 +8,17 @@ on:
 
 jobs:
   build-windows:
-    name: Build Windows x64 - Node ${{ matrix.node }}
+    name: Build Windows x64 - Node 20
     runs-on: windows-latest
-    
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [16, 18, 20]
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Setup Node.js ${{ matrix.node }}
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '20'
       
       - name: Install vcpkg
         run: |
@@ -56,7 +51,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: prebuilds-windows-node${{ matrix.node }}
+          name: prebuilds-windows-x64-node20
           path: prebuilds/
 
   release:
@@ -69,18 +64,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      # Download all Windows artifacts
-      - name: Download all artifacts
+      - name: Download prebuild artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-prebuilds
+          name: prebuilds-windows-x64-node20
+          path: prebuilds
       
-      # Merge all prebuilds into one directory
-      - name: Merge prebuilds
+      - name: List files to be released
         run: |
-          mkdir -p prebuilds
-          find all-prebuilds -type f -name "*.tar.gz" -exec cp {} prebuilds/ \;
-          echo "Merged prebuild files:"
+          echo "Files to be released:"
           ls -lah prebuilds/
       
       - name: Create Release
@@ -92,40 +84,50 @@ jobs:
           body: |
             ## 📦 预编译包说明
             
-            此版本包含 **Windows x64** 平台的预编译包，支持多个 Node.js 版本。
+            此版本包含 **Windows x64** 平台的预编译包，适用于 **Node.js 20+**。
             
             ### ✅ 支持的平台（预编译包）
             
             | 平台 | 架构 | Node.js 版本 | 安装方式 |
             |------|------|--------------|----------|
-            | **Windows** | x64 | 16, 18, 20 | 🚀 **自动下载预编译包** |
+            | **Windows** | x64 | **20+** | 🚀 **自动下载预编译包** |
             
-            ### 🔧 其他平台（源码编译）
+            ### 🔧 其他平台/版本（源码编译）
             
             | 平台 | Node.js 版本 | 安装方式 |
             |------|--------------|----------|
-            | **Linux** | 16, 18, 20 | ⚙️ 自动源码编译 |
-            | **macOS** | 16, 18, 20 | ⚙️ 自动源码编译 |
+            | Windows | 16, 18 | ⚙️ 自动源码编译 |
+            | Linux | 16, 18, 20+ | ⚙️ 自动源码编译 |
+            | macOS | 16, 18, 20+ | ⚙️ 自动源码编译 |
             
             ---
             
             ## 📥 安装
             
-            ### Windows 用户（推荐）
+            ### Windows + Node 20 用户（推荐）
             
             ```bash
             npm install baja-lite-xlsx
             ```
             
-            ✅ **无需任何编译环境**，自动下载预编译包！
+            ✅ **无需任何编译环境**，自动下载预编译包，即装即用！
             
-            ### Linux/macOS 用户
+            ### 其他环境
             
             ```bash
             npm install baja-lite-xlsx
             ```
             
             ⚙️ **需要编译环境**（安装时自动编译）
+            
+            #### Windows（Node 16/18）编译要求
+            
+            ```bash
+            # 需要安装：
+            # 1. Visual Studio 2019+ 或 Build Tools for Visual Studio
+            # 2. vcpkg
+            # 3. xlnt (通过 vcpkg install xlnt:x64-windows)
+            ```
             
             #### Linux 编译要求
             
@@ -151,25 +153,23 @@ jobs:
             ## 🎯 预编译包详情
             
             **包含的文件：**
-            - `napi-v8-win32-x64.tar.gz` - Windows x64 (Node 16/18/20 通用)
+            - `napi-v8-win32-x64.tar.gz` - Windows x64, Node.js 20+
             
             **自动匹配：**
             - ✅ Windows 10/11 x64
-            - ✅ Windows Server 2016+ x64
-            - ✅ Node.js 16.x, 18.x, 20.x
+            - ✅ Windows Server 2019+ x64
+            - ✅ Node.js 20.x
             
-            **不匹配时：**
-            - ⚙️ 自动回退到源码编译
-            - 需要 Visual Studio 2019+ 或 Build Tools
-            - 需要 vcpkg + xlnt
+            **不匹配时自动回退到源码编译**
             
             ---
             
-            ## 📚 文档
+            ## 📚 文档与示例
             
-            - [完整文档](https://github.com/void-soul/baja-lite-xlsx#readme)
-            - [API 文档](https://github.com/void-soul/baja-lite-xlsx/blob/master/README.md)
-            - [示例代码](https://github.com/void-soul/baja-lite-xlsx/tree/master/examples)
+            - [📖 完整文档](https://github.com/void-soul/baja-lite-xlsx#readme)
+            - [🚀 快速开始](https://github.com/void-soul/baja-lite-xlsx/blob/master/QUICKSTART.md)
+            - [💻 示例代码](https://github.com/void-soul/baja-lite-xlsx/tree/master/examples)
+            - [🔧 API 文档](https://github.com/void-soul/baja-lite-xlsx/blob/master/API_USAGE_CN.md)
             
             ## 🐛 问题反馈
             
@@ -179,16 +179,23 @@ jobs:
             
             ## 📊 技术细节
             
-            **预编译包大小：** ~500KB - 1MB（压缩后）
-            
-            **编译选项：**
+            **预编译包信息：**
+            - 大小: ~500KB - 1MB（压缩后）
             - Runtime: N-API v8
             - 架构: x64
             - 优化: Release + Strip
+            - 依赖: xlnt, libzip, zlib
             
             **兼容性：**
-            - ✅ N-API v8 (Node.js >= 16)
+            - ✅ N-API v8 (Node.js >= 20)
             - ✅ Windows SDK 10.0+
             - ✅ MSVC 2019+
+            
+            **功能特性：**
+            - ✅ 读取 Excel 数据
+            - ✅ 提取图片
+            - ✅ 支持多 Sheet
+            - ✅ 支持 Buffer/base64 输入
+            - ✅ TypeScript 类型支持
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
