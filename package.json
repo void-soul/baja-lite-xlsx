@@ -1,6 +1,6 @@
 {
   "name": "baja-lite-xlsx",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "A native Node.js module for reading Excel files and extracting images using xlnt library",
   "main": "index.js",
   "types": "index.d.ts",
