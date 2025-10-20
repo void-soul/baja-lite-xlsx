@@ -1,4 +1,4 @@
-name: Prebuild Native Module (Multi-Platform)
+name: Prebuild Native Module
 
 on:
   push:
@@ -7,14 +7,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build ${{ matrix.os }} - Node ${{ matrix.node }}
-    runs-on: ${{ matrix.os }}
+  build-windows:
+    name: Build Windows x64 - Node ${{ matrix.node }}
+    runs-on: windows-latest
     
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
         node: [16, 18, 20]
     
     steps:
@@ -26,39 +25,18 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       
-      # Windows: Install dependencies via vcpkg
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
+      - name: Install vcpkg
         run: |
           git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
           cd C:\vcpkg
           .\bootstrap-vcpkg.bat
           .\vcpkg install xlnt:x64-windows
-          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
         shell: powershell
       
-      # Linux: Install dependencies via apt
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Set environment variables
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential python3 libxlnt-dev || true
-          # If libxlnt-dev not available, build from source
-          if ! dpkg -l | grep -q libxlnt-dev; then
-            git clone https://github.com/tfussell/xlnt.git /tmp/xlnt
-            cd /tmp/xlnt
-            mkdir build && cd build
-            cmake ..
-            make -j$(nproc)
-            sudo make install
-            sudo ldconfig
-          fi
-      
-      # macOS: Install dependencies via Homebrew
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install xlnt || brew link xlnt
+          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
+        shell: powershell
       
       - name: Install npm dependencies
         run: npm install --ignore-scripts
@@ -69,28 +47,21 @@ jobs:
       - name: Create prebuild package
         run: npx prebuild --runtime napi --target 8 --strip
       
-      - name: List generated files (Windows)
-        if: runner.os == 'Windows'
+      - name: List generated files
         run: |
           Write-Host "Generated prebuild files:"
           Get-ChildItem prebuilds -Recurse | Format-Table Name, Length
         shell: powershell
       
-      - name: List generated files (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          echo "Generated prebuild files:"
-          find prebuilds -type f -exec ls -lh {} \;
-      
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: prebuilds-${{ matrix.os }}-node${{ matrix.node }}
+          name: prebuilds-windows-node${{ matrix.node }}
           path: prebuilds/
 
   release:
     name: Create Release
-    needs: [build]
+    needs: [build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     
@@ -98,7 +69,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      # Download all artifacts from all build jobs
+      # Download all Windows artifacts
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -121,49 +92,103 @@ jobs:
           body: |
             ## 📦 预编译包说明
             
-            此版本包含多平台预编译包，支持以下环境：
+            此版本包含 **Windows x64** 平台的预编译包，支持多个 Node.js 版本。
             
-            ### ✅ 支持的平台
+            ### ✅ 支持的平台（预编译包）
             
-            | 平台 | 架构 | Node.js 版本 | 状态 |
-            |------|------|--------------|------|
-            | **Windows** | x64 | 16, 18, 20 | ✅ |
-            | **Linux** | x64 | 16, 18, 20 | ✅ |
-            | **macOS** | x64/arm64 | 16, 18, 20 | ✅ |
+            | 平台 | 架构 | Node.js 版本 | 安装方式 |
+            |------|------|--------------|----------|
+            | **Windows** | x64 | 16, 18, 20 | 🚀 **自动下载预编译包** |
             
-            ### 📥 安装
+            ### 🔧 其他平台（源码编译）
+            
+            | 平台 | Node.js 版本 | 安装方式 |
+            |------|--------------|----------|
+            | **Linux** | 16, 18, 20 | ⚙️ 自动源码编译 |
+            | **macOS** | 16, 18, 20 | ⚙️ 自动源码编译 |
+            
+            ---
+            
+            ## 📥 安装
+            
+            ### Windows 用户（推荐）
             
             ```bash
             npm install baja-lite-xlsx
             ```
             
-            **自动下载预编译包：**
-            - ✅ Windows x64 (Node 16/18/20)
-            - ✅ Linux x64 (Node 16/18/20)
-            - ✅ macOS (Node 16/18/20)
+            ✅ **无需任何编译环境**，自动下载预编译包！
             
-            ### 🔧 源码编译（备用方案）
+            ### Linux/macOS 用户
             
-            如果您的平台不在上述列表中，安装时会自动回退到源码编译。
+            ```bash
+            npm install baja-lite-xlsx
+            ```
             
-            **Windows 编译要求：**
-            - Visual Studio 2019+ 或 Build Tools
-            - vcpkg + xlnt
+            ⚙️ **需要编译环境**（安装时自动编译）
             
-            **Linux 编译要求：**
-            - build-essential
-            - libxlnt-dev 或从源码构建
+            #### Linux 编译要求
             
-            **macOS 编译要求：**
-            - Xcode Command Line Tools
-            - Homebrew + xlnt
+            **Ubuntu/Debian:**
+            ```bash
+            sudo apt-get install -y build-essential cmake git
+            ```
             
-            ### 📚 文档
+            **CentOS/RHEL:**
+            ```bash
+            sudo yum groupinstall "Development Tools"
+            sudo yum install cmake git
+            ```
             
-            查看 [README.md](https://github.com/void-soul/baja-lite-xlsx#readme) 获取完整文档和示例。
+            #### macOS 编译要求
             
-            ### 🐛 问题反馈
+            ```bash
+            xcode-select --install
+            ```
             
-            如遇到问题，请提交 [Issue](https://github.com/void-soul/baja-lite-xlsx/issues)。
+            ---
+            
+            ## 🎯 预编译包详情
+            
+            **包含的文件：**
+            - `napi-v8-win32-x64.tar.gz` - Windows x64 (Node 16/18/20 通用)
+            
+            **自动匹配：**
+            - ✅ Windows 10/11 x64
+            - ✅ Windows Server 2016+ x64
+            - ✅ Node.js 16.x, 18.x, 20.x
+            
+            **不匹配时：**
+            - ⚙️ 自动回退到源码编译
+            - 需要 Visual Studio 2019+ 或 Build Tools
+            - 需要 vcpkg + xlnt
+            
+            ---
+            
+            ## 📚 文档
+            
+            - [完整文档](https://github.com/void-soul/baja-lite-xlsx#readme)
+            - [API 文档](https://github.com/void-soul/baja-lite-xlsx/blob/master/README.md)
+            - [示例代码](https://github.com/void-soul/baja-lite-xlsx/tree/master/examples)
+            
+            ## 🐛 问题反馈
+            
+            遇到问题？请提交 [Issue](https://github.com/void-soul/baja-lite-xlsx/issues)
+            
+            ---
+            
+            ## 📊 技术细节
+            
+            **预编译包大小：** ~500KB - 1MB（压缩后）
+            
+            **编译选项：**
+            - Runtime: N-API v8
+            - 架构: x64
+            - 优化: Release + Strip
+            
+            **兼容性：**
+            - ✅ N-API v8 (Node.js >= 16)
+            - ✅ Windows SDK 10.0+
+            - ✅ MSVC 2019+
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
