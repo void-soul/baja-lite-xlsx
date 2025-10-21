@@ -1,6 +1,6 @@
 {
   "name": "baja-lite-xlsx",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "A native Node.js module for reading Excel files and extracting images using xlnt library",
   "main": "index.js",
   "types": "index.d.ts",
@@ -17,7 +17,9 @@
     "example:advanced": "node examples/advanced.js"
   },
   "binary": {
-    "napi_versions": [8],
+    "napi_versions": [
+      8
+    ],
     "module_name": "baja_xlsx",
     "module_path": "./build/Release/",
     "host": "https://github.com/void-soul/baja-lite-xlsx/releases/download/",
