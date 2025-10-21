@@ -20,12 +20,14 @@ jobs:
         with:
           node-version: '20'
       
-      - name: Install vcpkg
+      - name: Install vcpkg and dependencies
         run: |
           git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
           cd C:\vcpkg
           .\bootstrap-vcpkg.bat
-          .\vcpkg install xlnt:x64-windows
+          Write-Host "Installing xlnt and libzip..."
+          .\vcpkg install xlnt:x64-windows libzip:x64-windows
+          Write-Host "Installation complete!"
         shell: powershell
       
       - name: Set environment variables
@@ -37,7 +39,7 @@ jobs:
       - name: Verify vcpkg installation
         run: |
           Write-Host "VCPKG_ROOT: C:\vcpkg"
-          Write-Host "Checking xlnt installation..."
+          Write-Host "`nChecking xlnt installation..."
           if (Test-Path "C:\vcpkg\installed\x64-windows\include\xlnt\xlnt.hpp") {
             Write-Host "✓ xlnt.hpp found"
           } else {
@@ -50,6 +52,20 @@ jobs:
             Write-Host "✗ xlnt.lib NOT found"
             exit 1
           }
+          Write-Host "`nChecking libzip installation..."
+          if (Test-Path "C:\vcpkg\installed\x64-windows\include\zip.h") {
+            Write-Host "✓ zip.h found"
+          } else {
+            Write-Host "✗ zip.h NOT found"
+            exit 1
+          }
+          if (Test-Path "C:\vcpkg\installed\x64-windows\lib\zip.lib") {
+            Write-Host "✓ zip.lib found"
+          } else {
+            Write-Host "✗ zip.lib NOT found"
+            exit 1
+          }
+          Write-Host "`n✓ All dependencies verified!"
         shell: powershell
       
       - name: Configure binding.gyp for CI
