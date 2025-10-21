@@ -70,10 +70,8 @@ jobs:
       
       - name: Configure binding.gyp for CI
         run: |
-          $content = Get-Content binding.gyp -Raw
-          $content = $content -replace '<!\(echo %VCPKG_ROOT%\)', 'C:/vcpkg'
-          Set-Content binding.gyp -Value $content
-          Write-Host "Updated binding.gyp with vcpkg path"
+          node -e "const fs = require('fs'); let content = fs.readFileSync('binding.gyp', 'utf8'); content = content.replace(/<!\(echo %VCPKG_ROOT%\)/g, 'C:/vcpkg'); fs.writeFileSync('binding.gyp', content); console.log('✓ Updated binding.gyp with vcpkg path');"
+          Get-Content binding.gyp | Select-String -Pattern "C:/vcpkg" | ForEach-Object { Write-Host "Verified: $_" }
         shell: powershell
       
       - name: Install npm dependencies
