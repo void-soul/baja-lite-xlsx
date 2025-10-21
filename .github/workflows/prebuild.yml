@@ -39,38 +39,41 @@ jobs:
       - name: Verify vcpkg installation
         run: |
           Write-Host "VCPKG_ROOT: C:\vcpkg"
-          Write-Host "`nChecking xlnt installation..."
+          Write-Host ""
+          Write-Host "Checking xlnt installation..."
           if (Test-Path "C:\vcpkg\installed\x64-windows\include\xlnt\xlnt.hpp") {
-            Write-Host "✓ xlnt.hpp found"
+            Write-Host "[OK] xlnt.hpp found"
           } else {
-            Write-Host "✗ xlnt.hpp NOT found"
+            Write-Host "[ERROR] xlnt.hpp NOT found"
             exit 1
           }
           if (Test-Path "C:\vcpkg\installed\x64-windows\lib\xlnt.lib") {
-            Write-Host "✓ xlnt.lib found"
+            Write-Host "[OK] xlnt.lib found"
           } else {
-            Write-Host "✗ xlnt.lib NOT found"
+            Write-Host "[ERROR] xlnt.lib NOT found"
             exit 1
           }
-          Write-Host "`nChecking libzip installation..."
+          Write-Host ""
+          Write-Host "Checking libzip installation..."
           if (Test-Path "C:\vcpkg\installed\x64-windows\include\zip.h") {
-            Write-Host "✓ zip.h found"
+            Write-Host "[OK] zip.h found"
           } else {
-            Write-Host "✗ zip.h NOT found"
+            Write-Host "[ERROR] zip.h NOT found"
             exit 1
           }
           if (Test-Path "C:\vcpkg\installed\x64-windows\lib\zip.lib") {
-            Write-Host "✓ zip.lib found"
+            Write-Host "[OK] zip.lib found"
           } else {
-            Write-Host "✗ zip.lib NOT found"
+            Write-Host "[ERROR] zip.lib NOT found"
             exit 1
           }
-          Write-Host "`n✓ All dependencies verified!"
+          Write-Host ""
+          Write-Host "[SUCCESS] All dependencies verified!"
         shell: powershell
       
       - name: Configure binding.gyp for CI
         run: |
-          node -e "const fs = require('fs'); let content = fs.readFileSync('binding.gyp', 'utf8'); content = content.replace(/<!\(echo %VCPKG_ROOT%\)/g, 'C:/vcpkg'); fs.writeFileSync('binding.gyp', content); console.log('✓ Updated binding.gyp with vcpkg path');"
+          node -e "const fs = require('fs'); let content = fs.readFileSync('binding.gyp', 'utf8'); content = content.replace(/<!\(echo %VCPKG_ROOT%\)/g, 'C:/vcpkg'); fs.writeFileSync('binding.gyp', content); console.log('[OK] Updated binding.gyp with vcpkg path');"
           Get-Content binding.gyp | Select-String -Pattern "C:/vcpkg" | ForEach-Object { Write-Host "Verified: $_" }
         shell: powershell
       
