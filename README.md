@@ -13,19 +13,24 @@ A high-performance native Node.js module for reading Excel files and extracting 
 - ✅ **Multi-Sheet Support** - Get sheet names and read from specific sheets
 - ✅ **JSON Output** - Easy-to-use JSON API with automatic image attachment
 - ✅ **TypeScript Support** - Full TypeScript type definitions included
-- ✅ **Prebuilt Binaries** - Windows x64 + Node 20 prebuilt packages available
+- ✅ **Prebuilt Binaries** - Windows x64 prebuilt packages for Node.js 20+ and Electron 34+
+- ✅ **Electron Support** - Works seamlessly in Electron applications
 
 ## Installation
 
-### Windows + Node.js 20 (Recommended)
+### Windows + Node.js 20 / Electron 34 (Recommended)
 
-For Windows x64 with Node.js 20+, prebuilt binaries are available:
+For Windows x64 with Node.js 20+ or Electron 34+, prebuilt binaries are available:
 
 ```bash
 npm install baja-lite-xlsx
 ```
 
 ✅ **No build tools required!** The precompiled package will be downloaded automatically.
+
+**Supported prebuilt platforms:**
+- Windows x64 + Node.js 20+
+- Windows x64 + Electron 34+
 
 ### Other Environments
 
@@ -237,6 +242,7 @@ See the [examples](./examples) directory for more detailed usage:
 - [json-api.js](./examples/json-api.js) - JSON API with all features
 - [advanced.js](./examples/advanced.js) - Advanced usage
 - [typescript-example.ts](./examples/typescript-example.ts) - TypeScript usage
+- [electron-example.js](./examples/electron-example.js) - Electron application usage
 
 Run examples:
 ```bash
@@ -298,6 +304,7 @@ git push origin v1.0.x
 
 The GitHub Actions workflow will automatically:
 - ✅ Build precompiled binaries for Windows x64 + Node 20
+- ✅ Build precompiled binaries for Windows x64 + Electron 34
 - ✅ Create a GitHub Release
 - ✅ Upload prebuilt packages to the release
 
@@ -312,9 +319,9 @@ npm publish
 
 The project uses GitHub Actions for automated builds:
 
-- **Trigger:** On push of tags matching `v*` (e.g., `v1.0.5`)
+- **Trigger:** On push of tags matching `v*` (e.g., `v1.0.8`)
 - **Platforms:** Windows x64
-- **Node.js Versions:** 20
+- **Runtimes:** Node.js 20, Electron 34
 - **Output:** Prebuilt packages uploaded to GitHub Releases
 
 **Workflow file:** [`.github/workflows/prebuild.yml`](./.github/workflows/prebuild.yml)
@@ -336,10 +343,11 @@ The project uses GitHub Actions for automated builds:
 - Linux (x64, ARM64)
 - macOS (x64, ARM64)
 
-**Supported Node.js Versions:**
+**Supported Runtimes:**
 - Node.js 16.x+
 - Node.js 18.x+
 - Node.js 20.x+ (prebuilt binaries available for Windows x64)
+- Electron 34.x+ (prebuilt binaries available for Windows x64)
 
 ## Troubleshooting
 

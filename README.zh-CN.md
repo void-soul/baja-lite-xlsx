@@ -13,19 +13,24 @@
 - ✅ **多工作表支持** - 获取工作表名称并读取指定工作表
 - ✅ **JSON 输出** - 易用的 JSON API，自动附加图片
 - ✅ **TypeScript 支持** - 完整的 TypeScript 类型定义
-- ✅ **预编译包** - Windows x64 + Node 20 提供预编译包
+- ✅ **预编译包** - Windows x64 为 Node.js 20+ 和 Electron 34+ 提供预编译包
+- ✅ **Electron 支持** - 在 Electron 应用中无缝工作
 
 ## 安装
 
-### Windows + Node.js 20（推荐）
+### Windows + Node.js 20 / Electron 34（推荐）
 
-对于 Windows x64 + Node.js 20+ 环境，提供预编译包：
+对于 Windows x64 + Node.js 20+ 或 Electron 34+ 环境，提供预编译包：
 
 ```bash
 npm install baja-lite-xlsx
 ```
 
 ✅ **无需任何编译环境！** 预编译包会自动下载。
+
+**支持的预编译平台：**
+- Windows x64 + Node.js 20+
+- Windows x64 + Electron 34+
 
 ### 其他环境
 
@@ -237,6 +242,7 @@ readTableAsJSON(base64);
 - [json-api.js](./examples/json-api.js) - JSON API 完整功能
 - [advanced.js](./examples/advanced.js) - 高级用法
 - [typescript-example.ts](./examples/typescript-example.ts) - TypeScript 用法
+- [electron-example.js](./examples/electron-example.js) - Electron 应用用法
 
 运行示例：
 ```bash
@@ -298,6 +304,7 @@ git push origin v1.0.x
 
 GitHub Actions 工作流会自动：
 - ✅ 为 Windows x64 + Node 20 构建预编译包
+- ✅ 为 Windows x64 + Electron 34 构建预编译包
 - ✅ 创建 GitHub Release
 - ✅ 上传预编译包到 Release
 
@@ -312,9 +319,9 @@ npm publish
 
 项目使用 GitHub Actions 进行自动化构建：
 
-- **触发条件：** 推送匹配 `v*` 的标签（如 `v1.0.5`）
+- **触发条件：** 推送匹配 `v*` 的标签（如 `v1.0.8`）
 - **平台：** Windows x64
-- **Node.js 版本：** 20
+- **运行时：** Node.js 20, Electron 34
 - **输出：** 预编译包上传到 GitHub Releases
 
 **工作流文件：** [`.github/workflows/prebuild.yml`](./.github/workflows/prebuild.yml)
@@ -336,10 +343,11 @@ npm publish
 - Linux (x64, ARM64)
 - macOS (x64, ARM64)
 
-**支持的 Node.js 版本：**
+**支持的运行时：**
 - Node.js 16.x+
 - Node.js 18.x+
 - Node.js 20.x+（Windows x64 提供预编译包）
+- Electron 34.x+（Windows x64 提供预编译包）
 
 ## 故障排查
 
