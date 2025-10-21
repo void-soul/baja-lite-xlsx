@@ -27,7 +27,7 @@
     ],
     "host": "https://github.com/void-soul/baja-lite-xlsx/releases/download/",
     "remote_path": "{version}",
-    "package_name": "{runtime}-v{abi}-{platform}-{arch}.tar.gz"
+    "package_name": "{name}-v{version}-{runtime}-v{abi}-{platform}-{arch}.tar.gz"
   },
   "keywords": [
     "excel",
