@@ -280,49 +280,155 @@ npm run build
 npm test
 ```
 
+### Building Prebuilt Binaries
+
+**Build for current platform:**
+```bash
+npm run prebuild
+```
+
+This generates a prebuilt package in the `prebuilds/` directory:
+```
+prebuilds/baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz
+```
+
+**Build for specific runtime:**
+```bash
+# For Node.js (N-API)
+npx prebuild --runtime napi --target 8
+
+# For Electron
+npx prebuild --runtime electron --target 34.0
+```
+
 ### Publishing to npm
+
+This project uses **prebuild** mechanism (similar to better-sqlite3) to provide precompiled binaries.
+
+**Complete publishing workflow:**
 
 **1. Update version:**
 ```bash
 npm version patch  # or minor, major
 ```
 
-**2. Commit and push:**
+**2. Push code and tags:**
 ```bash
-git add .
-git commit -m "chore: release v1.0.x"
-git push origin master
+git push origin master --tags
 ```
 
-**3. Create and push tag:**
-```bash
-git tag v1.0.x
-git push origin v1.0.x
-```
-
-**4. Wait for GitHub Actions:**
+**3. Wait for GitHub Actions:**
 
 The GitHub Actions workflow will automatically:
-- ✅ Build precompiled binaries for Windows x64 + Node 20
+- ✅ Build precompiled binaries for Windows x64 + Node.js (N-API v8)
 - ✅ Build precompiled binaries for Windows x64 + Electron 34
-- ✅ Create a GitHub Release
-- ✅ Upload prebuilt packages to the release
+- ✅ Create a GitHub Release (e.g., `v1.0.x`)
+- ✅ Upload `.tar.gz` packages to the release
+
+View progress at: `https://github.com/void-soul/baja-lite-xlsx/actions`
+
+**4. Verify the release:**
+
+Check that the release was created successfully:
+```
+https://github.com/void-soul/baja-lite-xlsx/releases/tag/v1.0.x
+```
+
+Expected files:
+- `baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz`
 
 **5. Publish to npm:**
 ```bash
 npm publish
 ```
 
-**Note:** The prebuilt binaries are hosted on GitHub Releases. Users with matching environments will automatically download them during `npm install`.
+**6. Test installation:**
 
-### GitHub Actions Workflow
+In a clean environment:
+```bash
+npm install baja-lite-xlsx@latest
+```
 
-The project uses GitHub Actions for automated builds:
+The package should download the prebuilt binary automatically (no compilation needed).
 
-- **Trigger:** On push of tags matching `v*` (e.g., `v1.0.8`)
-- **Platforms:** Windows x64
-- **Runtimes:** Node.js 20, Electron 34
-- **Output:** Prebuilt packages uploaded to GitHub Releases
+---
+
+### Prebuilt Binary Mechanism
+
+This project follows **better-sqlite3**'s prebuild approach:
+
+**How it works:**
+
+1. **Installation phase:**
+   ```bash
+   npm install baja-lite-xlsx
+   ```
+
+2. **prebuild-install** tries to download prebuilt binary:
+   ```
+   URL: https://github.com/void-soul/baja-lite-xlsx/releases/download/v1.0.x/baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz
+   ```
+
+3. **If download succeeds:**
+   - Extracts to `build/Release/baja_xlsx.node`
+   - ✅ Installation complete (fast)
+
+4. **If download fails:**
+   - Falls back to `node-gyp rebuild`
+   - Compiles from source (requires build tools)
+
+**Configuration** (`package.json`):
+```json
+{
+  "binary": {
+    "napi_versions": [8],
+    "module_name": "baja_xlsx",
+    "module_path": "./build/Release/",
+    "host": "https://github.com/void-soul/baja-lite-xlsx/releases/download/",
+    "remote_path": "v{version}",
+    "package_name": "{name}-v{version}-napi-v{abi}-{platform}-{arch}.tar.gz"
+  },
+  "scripts": {
+    "install": "prebuild-install --runtime napi || node-gyp rebuild",
+    "prebuild": "prebuild --runtime napi --target 8 --strip"
+  }
+}
+```
+
+**URL construction:**
+```
+{host}{remote_path}/{package_name}
+↓
+https://github.com/void-soul/baja-lite-xlsx/releases/download/v1.0.11/baja-lite-xlsx-v1.0.11-napi-v8-win32-x64.tar.gz
+```
+
+**Key variables:**
+- `{version}` → `1.0.11` (from package.json)
+- `{abi}` → `8` (N-API version)
+- `{platform}` → `win32`, `linux`, `darwin`
+- `{arch}` → `x64`, `arm64`
+
+**GitHub Actions workflow:**
+
+Triggered on tag push (`v*`):
+```yaml
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Build prebuilds
+        run: npm run prebuild
+      
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: prebuilds/*.tar.gz
+```
 
 **Workflow file:** [`.github/workflows/prebuild.yml`](./.github/workflows/prebuild.yml)
 

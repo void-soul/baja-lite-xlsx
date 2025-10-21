@@ -280,49 +280,155 @@ npm run build
 npm test
 ```
 
+### 构建预编译包
+
+**为当前平台构建：**
+```bash
+npm run prebuild
+```
+
+这会在 `prebuilds/` 目录生成预编译包：
+```
+prebuilds/baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz
+```
+
+**为特定运行时构建：**
+```bash
+# 为 Node.js (N-API) 构建
+npx prebuild --runtime napi --target 8
+
+# 为 Electron 构建
+npx prebuild --runtime electron --target 34.0
+```
+
 ### 发布到 npm
+
+本项目使用 **prebuild** 机制（类似 better-sqlite3）提供预编译二进制包。
+
+**完整发布流程：**
 
 **1. 更新版本：**
 ```bash
 npm version patch  # 或 minor, major
 ```
 
-**2. 提交并推送：**
+**2. 推送代码和标签：**
 ```bash
-git add .
-git commit -m "chore: release v1.0.x"
-git push origin master
+git push origin master --tags
 ```
 
-**3. 创建并推送标签：**
-```bash
-git tag v1.0.x
-git push origin v1.0.x
-```
-
-**4. 等待 GitHub Actions：**
+**3. 等待 GitHub Actions：**
 
 GitHub Actions 工作流会自动：
-- ✅ 为 Windows x64 + Node 20 构建预编译包
+- ✅ 为 Windows x64 + Node.js (N-API v8) 构建预编译包
 - ✅ 为 Windows x64 + Electron 34 构建预编译包
-- ✅ 创建 GitHub Release
-- ✅ 上传预编译包到 Release
+- ✅ 创建 GitHub Release（如 `v1.0.x`）
+- ✅ 上传 `.tar.gz` 包到 Release
+
+查看进度：`https://github.com/void-soul/baja-lite-xlsx/actions`
+
+**4. 验证 Release：**
+
+检查 Release 是否创建成功：
+```
+https://github.com/void-soul/baja-lite-xlsx/releases/tag/v1.0.x
+```
+
+预期文件：
+- `baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz`
 
 **5. 发布到 npm：**
 ```bash
 npm publish
 ```
 
-**注意：** 预编译包托管在 GitHub Releases。匹配环境的用户在 `npm install` 时会自动下载。
+**6. 测试安装：**
 
-### GitHub Actions 工作流
+在干净的环境中：
+```bash
+npm install baja-lite-xlsx@latest
+```
 
-项目使用 GitHub Actions 进行自动化构建：
+包应该自动下载预编译包（无需编译）。
 
-- **触发条件：** 推送匹配 `v*` 的标签（如 `v1.0.8`）
-- **平台：** Windows x64
-- **运行时：** Node.js 20, Electron 34
-- **输出：** 预编译包上传到 GitHub Releases
+---
+
+### 预编译机制
+
+本项目参考 **better-sqlite3** 的 prebuild 方案：
+
+**工作原理：**
+
+1. **安装阶段：**
+   ```bash
+   npm install baja-lite-xlsx
+   ```
+
+2. **prebuild-install** 尝试下载预编译包：
+   ```
+   URL: https://github.com/void-soul/baja-lite-xlsx/releases/download/v1.0.x/baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz
+   ```
+
+3. **如果下载成功：**
+   - 解压到 `build/Release/baja_xlsx.node`
+   - ✅ 安装完成（快速）
+
+4. **如果下载失败：**
+   - 回退到 `node-gyp rebuild`
+   - 从源码编译（需要编译工具）
+
+**配置** (`package.json`)：
+```json
+{
+  "binary": {
+    "napi_versions": [8],
+    "module_name": "baja_xlsx",
+    "module_path": "./build/Release/",
+    "host": "https://github.com/void-soul/baja-lite-xlsx/releases/download/",
+    "remote_path": "v{version}",
+    "package_name": "{name}-v{version}-napi-v{abi}-{platform}-{arch}.tar.gz"
+  },
+  "scripts": {
+    "install": "prebuild-install --runtime napi || node-gyp rebuild",
+    "prebuild": "prebuild --runtime napi --target 8 --strip"
+  }
+}
+```
+
+**URL 构建规则：**
+```
+{host}{remote_path}/{package_name}
+↓
+https://github.com/void-soul/baja-lite-xlsx/releases/download/v1.0.11/baja-lite-xlsx-v1.0.11-napi-v8-win32-x64.tar.gz
+```
+
+**关键变量：**
+- `{version}` → `1.0.11`（来自 package.json）
+- `{abi}` → `8`（N-API 版本）
+- `{platform}` → `win32`, `linux`, `darwin`
+- `{arch}` → `x64`, `arm64`
+
+**GitHub Actions 工作流：**
+
+标签推送时触发（`v*`）：
+```yaml
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Build prebuilds
+        run: npm run prebuild
+      
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: prebuilds/*.tar.gz
+```
 
 **工作流文件：** [`.github/workflows/prebuild.yml`](./.github/workflows/prebuild.yml)
 
