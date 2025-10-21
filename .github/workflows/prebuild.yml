@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build Windows x64 - Node 20
+    name: Build Windows x64 - Node 20 + Electron 34
     runs-on: windows-latest
     
     steps:
@@ -39,7 +39,7 @@ jobs:
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
           [System.Environment]::SetEnvironmentVariable('VCPKG_ROOT', 'C:\vcpkg', [System.EnvironmentVariableTarget]::Process)
         shell: powershell
-      
+
       - name: Verify vcpkg installation
         run: |
           Write-Host "VCPKG_ROOT: C:\vcpkg"
@@ -91,8 +91,13 @@ jobs:
         env:
           VCPKG_ROOT: C:\vcpkg
       
-      - name: Create prebuild package
+      - name: Create prebuild package for Node.js
         run: npx prebuild --runtime napi --target 8 --strip
+        env:
+          VCPKG_ROOT: C:\vcpkg
+      
+      - name: Create prebuild package for Electron 34
+        run: npx prebuild --runtime electron --target 34.0.0 --strip
         env:
           VCPKG_ROOT: C:\vcpkg
       
@@ -105,7 +110,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: prebuilds-windows-x64-node20
+          name: prebuilds-windows-x64
           path: prebuilds/
 
   release:
@@ -121,7 +126,7 @@ jobs:
       - name: Download prebuild artifacts
         uses: actions/download-artifact@v4
         with:
-          name: prebuilds-windows-x64-node20
+          name: prebuilds-windows-x64
           path: prebuilds
       
       - name: List files to be released
@@ -138,13 +143,14 @@ jobs:
           body: |
             ## 📦 预编译包说明
             
-            此版本包含 **Windows x64** 平台的预编译包，适用于 **Node.js 20+**。
+            此版本包含 **Windows x64** 平台的预编译包，适用于 **Node.js 20+** 和 **Electron 34+**。
             
             ### ✅ 支持的平台（预编译包）
             
-            | 平台 | 架构 | Node.js 版本 | 安装方式 |
-            |------|------|--------------|----------|
-            | **Windows** | x64 | **20+** | 🚀 **自动下载预编译包** |
+            | 平台 | 架构 | 运行时 | 版本 | 安装方式 |
+            |------|------|--------|------|----------|
+            | **Windows** | x64 | **Node.js** | **20+** | 🚀 **自动下载预编译包** |
+            | **Windows** | x64 | **Electron** | **34+** | 🚀 **自动下载预编译包** |
             
             ### 🔧 其他平台/版本（源码编译）
             
@@ -208,11 +214,13 @@ jobs:
             
             **包含的文件：**
             - `napi-v8-win32-x64.tar.gz` - Windows x64, Node.js 20+
+            - `electron-v34.0-win32-x64.tar.gz` - Windows x64, Electron 34+
             
             **自动匹配：**
             - ✅ Windows 10/11 x64
             - ✅ Windows Server 2019+ x64
             - ✅ Node.js 20.x
+            - ✅ Electron 34.x
             
             **不匹配时自动回退到源码编译**
             
@@ -234,14 +242,15 @@ jobs:
             ## 📊 技术细节
             
             **预编译包信息：**
-            - 大小: ~500KB - 1MB（压缩后）
-            - Runtime: N-API v8
+            - 大小: ~500KB - 1MB（压缩后，每个包）
+            - Runtime: N-API v8 / Electron v34
             - 架构: x64
             - 优化: Release + Strip
             - 依赖: xlnt, libzip, zlib
             
             **兼容性：**
             - ✅ N-API v8 (Node.js >= 20)
+            - ✅ Electron ABI v34 (Electron >= 34)
             - ✅ Windows SDK 10.0+
             - ✅ MSVC 2019+
             
