@@ -15,6 +15,53 @@ console.log('📦 将 DLL 文件打包到预编译包中...\n');
 const prebuildsDir = path.join(__dirname, '..', 'prebuilds');
 const buildReleaseDir = path.join(__dirname, '..', 'build', 'Release');
 
+// 首先确保 DLL 文件在 build/Release 目录中
+console.log('🔍 检查并复制 DLL 文件...\n');
+
+if (os.platform() === 'win32') {
+  const vcpkgSources = [
+    process.env.VCPKG_ROOT ? path.join(process.env.VCPKG_ROOT, 'installed', 'x64-windows', 'bin') : null,
+    'C:\\vcpkg\\installed\\x64-windows\\bin',
+    'E:\\vcpkg\\installed\\x64-windows\\bin',
+  ].filter(Boolean);
+  
+  const requiredDlls = ['xlnt.dll', 'zlib1.dll', 'bz2.dll', 'fmt.dll', 'zip.dll'];
+  
+  let copiedCount = 0;
+  
+  requiredDlls.forEach(dllName => {
+    const targetPath = path.join(buildReleaseDir, dllName);
+    
+    // 如果已存在，跳过
+    if (fs.existsSync(targetPath)) {
+      console.log(`  ✓ ${dllName} - 已存在`);
+      copiedCount++;
+      return;
+    }
+    
+    // 查找并复制
+    for (const sourceDir of vcpkgSources) {
+      if (!fs.existsSync(sourceDir)) continue;
+      
+      const sourcePath = path.join(sourceDir, dllName);
+      if (fs.existsSync(sourcePath)) {
+        try {
+          fs.copyFileSync(sourcePath, targetPath);
+          console.log(`  ✓ ${dllName} - 已复制`);
+          copiedCount++;
+          break;
+        } catch (err) {
+          console.error(`  ✗ ${dllName} - 复制失败: ${err.message}`);
+        }
+      }
+    }
+  });
+  
+  console.log(`\n已准备 ${copiedCount} 个 DLL 文件\n`);
+}
+
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
 if (!fs.existsSync(prebuildsDir)) {
   console.error('❌ prebuilds 目录不存在');
   process.exit(1);

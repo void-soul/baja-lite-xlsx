@@ -86,30 +86,6 @@ jobs:
         env:
           VCPKG_ROOT: C:\vcpkg
 
-      - name: Build native module
-        run: npm run build
-        env:
-          VCPKG_ROOT: C:\vcpkg
-      
-      - name: Package DLL dependencies
-        run: node scripts/package-dlls.js
-        env:
-          VCPKG_ROOT: C:\vcpkg
-      
-      - name: Verify DLL files are packaged
-        run: |
-          Write-Host "Checking DLL files in build/Release..."
-          Get-ChildItem build/Release -Filter *.dll | ForEach-Object {
-            Write-Host "  ✓ $($_.Name) - $([math]::Round($_.Length/1KB, 1)) KB"
-          }
-          $dllCount = (Get-ChildItem build/Release -Filter *.dll).Count
-          if ($dllCount -eq 0) {
-            Write-Host "⚠️ Warning: No DLL files found!"
-          } else {
-            Write-Host "`n✅ Found $dllCount DLL file(s)"
-          }
-        shell: powershell
-      
       - name: Create prebuild package for Node.js
         run: npx prebuild --runtime napi --target 8 --strip
         env:
