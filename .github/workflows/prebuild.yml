@@ -91,6 +91,25 @@ jobs:
         env:
           VCPKG_ROOT: C:\vcpkg
       
+      - name: Package DLL dependencies
+        run: node scripts/package-dlls.js
+        env:
+          VCPKG_ROOT: C:\vcpkg
+      
+      - name: Verify DLL files are packaged
+        run: |
+          Write-Host "Checking DLL files in build/Release..."
+          Get-ChildItem build/Release -Filter *.dll | ForEach-Object {
+            Write-Host "  ✓ $($_.Name) - $([math]::Round($_.Length/1KB, 1)) KB"
+          }
+          $dllCount = (Get-ChildItem build/Release -Filter *.dll).Count
+          if ($dllCount -eq 0) {
+            Write-Host "⚠️ Warning: No DLL files found!"
+          } else {
+            Write-Host "`n✅ Found $dllCount DLL file(s)"
+          }
+        shell: powershell
+      
       - name: Create prebuild package for Node.js
         run: npx prebuild --runtime napi --target 8 --strip
         env:
@@ -101,10 +120,54 @@ jobs:
         env:
           VCPKG_ROOT: C:\vcpkg
       
+      - name: Pack DLLs into prebuild packages
+        run: node scripts/pack-dlls-into-prebuild.js
+        env:
+          VCPKG_ROOT: C:\vcpkg
+      
       - name: List generated files
         run: |
-          Write-Host "Generated prebuild files:"
-          Get-ChildItem prebuilds -Recurse | Format-Table Name, Length
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "📦 Generated prebuild packages:"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Get-ChildItem prebuilds -Recurse -File | ForEach-Object {
+            $sizeKB = [math]::Round($_.Length/1KB, 1)
+            Write-Host "  📄 $($_.Name) - $sizeKB KB"
+          }
+          Write-Host ""
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "🔍 Verifying package contents (extract first .tar.gz):"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          $firstTarGz = Get-ChildItem prebuilds -Filter *.tar.gz | Select-Object -First 1
+          if ($firstTarGz) {
+            $tempDir = New-Item -ItemType Directory -Path "temp_extract" -Force
+            tar -xzf $firstTarGz.FullName -C $tempDir.FullName
+            Write-Host "`nContents of $($firstTarGz.Name):"
+            Get-ChildItem $tempDir.FullName -Recurse | ForEach-Object {
+              if ($_.PSIsContainer) {
+                Write-Host "  📁 $($_.Name)/"
+              } else {
+                $sizeKB = [math]::Round($_.Length/1KB, 1)
+                $ext = $_.Extension
+                $icon = if ($ext -eq '.node') { '🔷' } elseif ($ext -eq '.dll') { '📚' } else { '📄' }
+                Write-Host "  $icon $($_.Name) - $sizeKB KB"
+              }
+            }
+            Write-Host ""
+            
+            # 检查是否包含必要的 DLL
+            $hasXlnt = (Get-ChildItem $tempDir.FullName -Recurse -Filter "xlnt.dll" -ErrorAction SilentlyContinue).Count -gt 0
+            $hasZlib = (Get-ChildItem $tempDir.FullName -Recurse -Filter "zlib*.dll" -ErrorAction SilentlyContinue).Count -gt 0
+            if ($hasXlnt -and $hasZlib) {
+              Write-Host "✅ Package contains required DLL files - Ready for distribution!"
+            } else {
+              Write-Host "⚠️  Warning: Package may be missing required DLL files"
+            }
+            
+            # 清理临时目录
+            Remove-Item $tempDir -Recurse -Force
+          }
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         shell: powershell
       
       - name: Upload artifacts

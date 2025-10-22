@@ -6,12 +6,19 @@
   "types": "index.d.ts",
   "scripts": {
     "install": "prebuild-install --runtime napi || node-gyp rebuild",
-    "prebuild": "prebuild --runtime napi --target 8 --strip",
+    "postinstall": "node scripts/postinstall.js",
+    "prebuild": "npm run prebuild:create && npm run prebuild:pack-dlls",
+    "prebuild:create": "npm run prebuild:napi && npm run prebuild:electron",
+    "prebuild:napi": "node scripts/package-dlls.js && prebuild --runtime napi --target 8 --strip",
+    "prebuild:electron": "node scripts/package-dlls.js && prebuild --runtime electron --target 34.0.0 --strip",
+    "prebuild:pack-dlls": "node scripts/pack-dlls-into-prebuild.js",
     "build": "node-gyp rebuild",
     "build:dev": "node-gyp rebuild && npm run copy-dlls:dev",
+    "copy-dlls": "node scripts/package-dlls.js",
     "copy-dlls:dev": "node -e \"const fs=require('fs'); const path=require('path'); const src='E:/vcpkg/installed/x64-windows/bin'; const dest='./build/Release'; if(fs.existsSync(src) && fs.existsSync(dest)){fs.readdirSync(src).filter(f=>f.endsWith('.dll')).forEach(f=>fs.copyFileSync(path.join(src,f),path.join(dest,f)));console.log('✓ DLLs copied');}\"",
     "clean": "node-gyp clean",
     "test": "node test/test.js",
+    "test:prebuild": "node scripts/test-prebuild-package.js",
     "example": "node examples/basic.js",
     "example:json": "node examples/json-api.js",
     "example:advanced": "node examples/advanced.js"
@@ -22,6 +29,10 @@
     ],
     "module_name": "baja_xlsx",
     "module_path": "./build/Release/",
+    "files": [
+      "*.node",
+      "*.dll"
+    ],
     "host": "https://github.com/void-soul/baja-lite-xlsx/releases/download/",
     "remote_path": "v{version}",
     "package_name": "{name}-v{version}-napi-v{abi}-{platform}-{arch}.tar.gz"
