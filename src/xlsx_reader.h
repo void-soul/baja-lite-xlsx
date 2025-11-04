@@ -23,6 +23,12 @@ struct ImagePosition {
     int toRow;
 };
 
+// WPS Excel embedded image ID to filename mapping
+struct CellImageMapping {
+    std::string imageId;      // e.g., "ID_C6F9C8CE7BB34DB9B1BB9835C5297155"
+    std::string imageName;    // e.g., "image1.png"
+};
+
 struct SheetData {
     std::string name;
     std::vector<std::vector<std::string>> data;
@@ -32,6 +38,7 @@ struct ExcelData {
     std::vector<SheetData> sheets;
     std::vector<ImageData> images;
     std::vector<ImagePosition> imagePositions;
+    std::vector<CellImageMapping> cellImageMappings;  // WPS Excel support
 };
 
 class XlsxReader {

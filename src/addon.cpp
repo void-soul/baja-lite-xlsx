@@ -21,7 +21,8 @@ Object createImageObject(Env env, const ImageData& img) {
 // Helper function to convert C++ vector to JS array
 Array sheetsToArray(Env env, const std::vector<SheetData>& sheets, 
                     const std::vector<ImageData>& images,
-                    const std::vector<ImagePosition>& positions) {
+                    const std::vector<ImagePosition>& positions,
+                    const std::vector<CellImageMapping>& cellImageMappings) {
     Array result = Array::New(env, sheets.size());
     
     for (size_t i = 0; i < sheets.size(); ++i) {
@@ -35,26 +36,43 @@ Array sheetsToArray(Env env, const std::vector<SheetData>& sheets,
                 const std::string& cellValue = sheets[i].data[row][col];
                 
                 // Check if this is an embedded image cell marker
-                if (cellValue == "__IMAGE_CELL__") {
-                    // Find the image for this cell position
+                // Format: __IMAGE_CELL__ or __IMAGE_CELL__:ID_xxx (WPS Excel)
+                if (cellValue.find("__IMAGE_CELL__") == 0) {
                     bool imageFound = false;
+                    std::string targetImageName;
                     
-                    for (const auto& pos : positions) {
-                        // Match by sheet name and cell position
-                        if (pos.sheetName == sheets[i].name &&
-                            pos.fromRow == static_cast<int>(row) &&
-                            pos.fromCol == static_cast<int>(col)) {
-                            
-                            // Find the corresponding image
-                            for (const auto& img : images) {
-                                if (img.name == pos.imageName) {
-                                    rowArray.Set(col, createImageObject(env, img));
-                                    imageFound = true;
-                                    break;
-                                }
+                    // Check if this is WPS Excel format with embedded ID
+                    if (cellValue.find("__IMAGE_CELL__:") == 0) {
+                        // Extract image ID (e.g., "ID_C6F9C8CE7BB34DB9B1BB9835C5297155")
+                        std::string imageId = cellValue.substr(15); // Skip "__IMAGE_CELL__:"
+                        
+                        // Find the image name using cellImageMappings
+                        for (const auto& mapping : cellImageMappings) {
+                            if (mapping.imageId == imageId) {
+                                targetImageName = mapping.imageName;
+                                break;
                             }
-                            
-                            if (imageFound) break;
+                        }
+                    } else {
+                        // Standard Excel format - find by position
+                        for (const auto& pos : positions) {
+                            if (pos.sheetName == sheets[i].name &&
+                                pos.fromRow == static_cast<int>(row) &&
+                                pos.fromCol == static_cast<int>(col)) {
+                                targetImageName = pos.imageName;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Find the image by name
+                    if (!targetImageName.empty()) {
+                        for (const auto& img : images) {
+                            if (img.name == targetImageName) {
+                                rowArray.Set(col, createImageObject(env, img));
+                                imageFound = true;
+                                break;
+                            }
                         }
                     }
                     
@@ -91,6 +109,9 @@ Array sheetsToArray(Env env, const std::vector<SheetData>& sheets,
                 if (targetRow >= 0 && targetRow < static_cast<int>(sheets[i].data.size())) {
                     if (targetCol >= 0 && targetCol < static_cast<int>(sheets[i].data[targetRow].size())) {
                         // Find the image data
+                        bool found = false;
+                        
+                        // Try exact match first
                         for (const auto& img : images) {
                             if (img.name == pos.imageName) {
                                 // Get the row array
@@ -121,7 +142,42 @@ Array sheetsToArray(Env env, const std::vector<SheetData>& sheets,
                                     rowArray.Set(targetCol, createImageObject(env, img));
                                 }
                                 
+                                found = true;
                                 break;
+                            }
+                        }
+                        
+                        // If exact match fails, try fuzzy match
+                        if (!found) {
+                            for (const auto& img : images) {
+                                if (!pos.imageName.empty() && !img.name.empty() &&
+                                    (img.name.find(pos.imageName) != std::string::npos ||
+                                     pos.imageName.find(img.name) != std::string::npos)) {
+                                    
+                                    Array rowArray = dataArray.Get(targetRow).As<Array>();
+                                    Value currentValue = rowArray.Get(targetCol);
+                                    
+                                    if (currentValue.IsObject()) {
+                                        Object currentObj = currentValue.As<Object>();
+                                        if (currentObj.Has("data") && currentObj.Get("data").IsBuffer()) {
+                                            Array imgArray;
+                                            if (currentObj.IsArray()) {
+                                                imgArray = currentObj.As<Array>();
+                                            } else {
+                                                imgArray = Array::New(env, 1);
+                                                imgArray.Set(uint32_t(0), currentObj);
+                                            }
+                                            imgArray.Set(imgArray.Length(), createImageObject(env, img));
+                                            rowArray.Set(targetCol, imgArray);
+                                        } else {
+                                            rowArray.Set(targetCol, createImageObject(env, img));
+                                        }
+                                    } else {
+                                        rowArray.Set(targetCol, createImageObject(env, img));
+                                    }
+                                    
+                                    break;
+                                }
                             }
                         }
                     }
@@ -199,7 +255,7 @@ Value ReadExcel(const CallbackInfo& info) {
     }
     
     Object result = Object::New(env);
-    result.Set("sheets", sheetsToArray(env, data.sheets, data.images, data.imagePositions));
+    result.Set("sheets", sheetsToArray(env, data.sheets, data.images, data.imagePositions, data.cellImageMappings));
     result.Set("images", imagesToArray(env, data.images));
     result.Set("imagePositions", positionsToArray(env, data.imagePositions));
     

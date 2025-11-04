@@ -22,14 +22,18 @@ echo.
 REM 回到项目目录
 cd /d %~dp0\..
 
-echo [1/4] 清理旧的预编译包...
+echo [1/5] 清理旧的构建和预编译包...
+if exist build (
+    rmdir /s /q build
+    echo ✓ 已删除 build 目录
+)
 if exist prebuilds (
     rmdir /s /q prebuilds
-    echo ✓ 已删除旧的预编译包
+    echo ✓ 已删除 prebuilds 目录
 )
 echo.
 
-echo [2/4] 编译原生模块...
+echo [2/5] 重新编译原生模块...
 call npm run build
 if %errorlevel% neq 0 (
     echo [✗] 编译失败
@@ -39,16 +43,11 @@ if %errorlevel% neq 0 (
 echo ✓ 编译成功
 echo.
 
-echo [3/4] 复制 DLL 文件...
+echo [3/5] 复制 DLL 文件到 build/Release...
 call npm run copy-dlls
-if %errorlevel% neq 0 (
-    echo [✗] DLL 复制失败
-    pause
-    exit /b 1
-)
 echo.
 
-echo [4/4] 创建预编译包...
+echo [4/5] 创建预编译包（不含 DLL）...
 echo.
 
 echo 📦 创建 N-API v8 预编译包...
@@ -64,6 +63,15 @@ echo 📦 创建 Electron v34 预编译包...
 call npx prebuild --runtime electron --target 34.0.0 --strip
 if %errorlevel% neq 0 (
     echo [✗] Electron 预编译包创建失败
+    pause
+    exit /b 1
+)
+echo.
+
+echo [5/5] 将 DLL 打包到预编译包中...
+call npm run prebuild:pack-dlls
+if %errorlevel% neq 0 (
+    echo [✗] DLL 打包失败
     pause
     exit /b 1
 )

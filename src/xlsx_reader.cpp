@@ -40,12 +40,19 @@ std::string XlsxReader::cellToString(const xlnt::cell& cell) {
                     std::string formula = cell.to_string();
                     
                     // Check if it's an embedded image formula (DISPIMG)
-                    // These formulas look like: =DISPIMG("ID_...", 1)
+                    // These formulas look like: =DISPIMG("ID_C6F9C8CE7BB34DB9B1BB9835C5297155", 1)
                     if (formula.find("DISPIMG") != std::string::npos) {
-                        // Return a special marker for embedded images
-                        // Format: __IMAGE_CELL__
-                        // The JS layer will detect this marker and replace it with the image data
-                        // by matching the cell position with imagePositions
+                        // Extract the image ID from the formula
+                        size_t idStart = formula.find("\"");
+                        if (idStart != std::string::npos) {
+                            size_t idEnd = formula.find("\"", idStart + 1);
+                            if (idEnd != std::string::npos) {
+                                std::string imageId = formula.substr(idStart + 1, idEnd - idStart - 1);
+                                // Return format: __IMAGE_CELL__:ID_xxx
+                                return "__IMAGE_CELL__:" + imageId;
+                            }
+                        }
+                        // Fallback if ID extraction fails
                         return "__IMAGE_CELL__";
                     }
                     
@@ -199,6 +206,15 @@ ExcelData XlsxReader::readExcel(const std::string& filepath) {
                 pos.toCol = anchor.toCol;
                 pos.toRow = anchor.toRow;
                 data.imagePositions.push_back(pos);
+            }
+            
+            // Convert CellImageInfo to CellImageMapping (WPS Excel)
+            const auto& cellImages = extractor.getCellImageMappings();
+            for (const auto& cellImg : cellImages) {
+                CellImageMapping mapping;
+                mapping.imageId = cellImg.imageId;
+                mapping.imageName = cellImg.imageName;
+                data.cellImageMappings.push_back(mapping);
             }
         } else {
             lastError_ = extractor.getLastError();

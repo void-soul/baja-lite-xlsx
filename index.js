@@ -90,79 +90,6 @@ function prepareFilePath(input) {
   throw new Error('Input must be a file path (string), Buffer, or base64 string');
 }
 
-/**
- * Read Excel file and extract all data including sheets, images, and image positions
- * @param {string} filepath - Path to the Excel file
- * @returns {Object} Object containing sheets, images, and imagePositions
- */
-function readExcel(filepath) {
-  if (!filepath) {
-    throw new Error('Filepath is required');
-  }
-  
-  // Convert to absolute path
-  const absolutePath = path.isAbsolute(filepath) ? filepath : path.resolve(filepath);
-  
-  // Check if file exists
-  if (!fs.existsSync(absolutePath)) {
-    throw new Error(`File not found: ${absolutePath}`);
-  }
-  
-  return addon.readExcel(absolutePath);
-}
-
-/**
- * Extract only images from Excel file
- * @param {string} filepath - Path to the Excel file
- * @returns {Array} Array of image objects with name, data (Buffer), and type
- */
-function extractImages(filepath) {
-  if (!filepath) {
-    throw new Error('Filepath is required');
-  }
-  
-  // Convert to absolute path
-  const absolutePath = path.isAbsolute(filepath) ? filepath : path.resolve(filepath);
-  
-  // Check if file exists
-  if (!fs.existsSync(absolutePath)) {
-    throw new Error(`File not found: ${absolutePath}`);
-  }
-  
-  return addon.extractImages(absolutePath);
-}
-
-/**
- * 获取Excel文件中所有Sheet的名称
- * @param {string|Buffer} input - Excel文件路径、Buffer 或 base64 字符串
- * @returns {string[]} Sheet名称数组
- * 
- * @example
- * // 使用文件路径
- * const names1 = getSheetNames('./sample.xlsx');
- * 
- * // 使用 Buffer
- * const buffer = fs.readFileSync('./sample.xlsx');
- * const names2 = getSheetNames(buffer);
- * 
- * // 使用 base64
- * const base64 = fs.readFileSync('./sample.xlsx').toString('base64');
- * const names3 = getSheetNames(base64);
- */
-function getSheetNames(input) {
-  if (!input) {
-    throw new Error('Input is required (filepath, Buffer, or base64 string)');
-  }
-  
-  const { filepath, cleanup } = prepareFilePath(input);
-  
-  try {
-    const data = addon.readExcel(filepath);
-    return data.sheets.map(sheet => sheet.name);
-  } finally {
-    cleanup();
-  }
-}
 
 /**
  * 读取Excel表格并返回JSON数组
@@ -280,11 +207,5 @@ function readTableAsJSON(input, options = {}) {
 
 
 module.exports = {
-  // 原始API
-  readExcel,
-  extractImages,
-  
-  // 高级API
-  readTableAsJSON,
-  getSheetNames
+  readTableAsJSON
 };

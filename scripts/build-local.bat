@@ -116,7 +116,7 @@ echo ============================================
 echo.
 
 REM 复制 DLL
-echo 正在复制依赖的 DLL...
+echo [3/3] 复制依赖的 DLL...
 call npm run copy-dlls
 
 if %errorlevel% neq 0 (
@@ -124,26 +124,13 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [2/2] 重新编译预设模块...
-call npm run prebuild
-if %errorlevel% neq 0 (
-    echo.
-    echo [✗] 编译失败
-    echo.
-    echo 请检查:
-    echo   1. Visual Studio Build Tools 是否已安装
-    echo   2. Node.js 版本是否 ^>= 16
-    echo   3. vcpkg 依赖是否正确安装
-    echo.
-    pause
-    exit /b 1
-)
-
-echo.
 echo ============================================
-echo [✓] 预设模块编译成功！
+echo [✅] 本地编译完成！
 echo ============================================
 echo.
-
+echo 现在可以:
+echo   1. 运行示例: npm run example
+echo   2. 测试模块: node test.js
+echo.
 pause
 

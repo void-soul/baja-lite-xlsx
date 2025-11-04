@@ -91,10 +91,10 @@ jobs:
         vcpkg install libzip:x64-windows
         vcpkg integrate install
     
-    - name: Update binding.gyp for CI
+    - name: Update scripts/binding.gyp for CI
       run: |
         $vcpkgRoot = $env:VCPKG_ROOT
-        (Get-Content binding.gyp) -replace 'C:/vcpkg', $vcpkgRoot | Set-Content binding.gyp
+        (Get-Content scripts/binding.gyp) -replace 'C:/vcpkg', $vcpkgRoot | Set-Content scripts/binding.gyp
     
     - name: Install npm dependencies
       run: npm install

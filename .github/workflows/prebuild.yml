@@ -75,10 +75,10 @@ jobs:
           Write-Host "[SUCCESS] All dependencies verified!"
         shell: powershell
       
-      - name: Configure binding.gyp for CI
+      - name: Configure scripts/binding.gyp for CI
         run: |
-          node -e "const fs = require('fs'); let content = fs.readFileSync('binding.gyp', 'utf8'); content = content.replace(/<!\(echo %VCPKG_ROOT%\)/g, 'C:/vcpkg'); fs.writeFileSync('binding.gyp', content); console.log('[OK] Updated binding.gyp with vcpkg path');"
-          Get-Content binding.gyp | Select-String -Pattern "C:/vcpkg" | ForEach-Object { Write-Host "Verified: $_" }
+          node -e "const fs = require('fs'); let content = fs.readFileSync('scripts/binding.gyp', 'utf8'); content = content.replace(/<!\(echo %VCPKG_ROOT%\)/g, 'C:/vcpkg'); fs.writeFileSync('scripts/binding.gyp', content); console.log('[OK] Updated scripts/binding.gyp with vcpkg path');"
+          Get-Content scripts/binding.gyp | Select-String -Pattern "C:/vcpkg" | ForEach-Object { Write-Host "Verified: $_" }
         shell: powershell
       
       - name: Install npm dependencies

@@ -4,61 +4,16 @@
 
 declare module 'baja-lite-xlsx' {
   /**
-   * Sheet data structure
+   * Image data object (returned in cell values)
+   * 图片数据对象（在单元格值中返回）
    */
-  export interface SheetData {
-    /** Sheet name */
-    name: string;
-    /** 2D array of cell values (rows x columns) */
-    data: string[][];
-  }
-
-  /**
-   * Image data structure
-   */
-  export interface ImageData {
-    /** Image filename */
-    name: string;
+  export interface ImageDataObject {
     /** Image data as Buffer */
     data: Buffer;
+    /** Image filename */
+    name: string;
     /** MIME type (e.g., 'image/png', 'image/jpeg') */
     type: string;
-  }
-
-  /**
-   * Image position information
-   */
-  export interface ImagePosition {
-    /** Image filename reference */
-    image: string;
-    /** Sheet name where the image is located */
-    sheet: string;
-    /** Top-left anchor position */
-    from: {
-      /** Column index (0-based) */
-      col: number;
-      /** Row index (0-based) */
-      row: number;
-    };
-    /** Bottom-right anchor position */
-    to: {
-      /** Column index (0-based) */
-      col: number;
-      /** Row index (0-based) */
-      row: number;
-    };
-  }
-
-  /**
-   * Complete Excel data structure
-   */
-  export interface ExcelData {
-    /** All sheets in the workbook */
-    sheets: SheetData[];
-    /** All images embedded in the workbook */
-    images: ImageData[];
-    /** Position information for all images */
-    imagePositions: ImagePosition[];
   }
 
   /**
@@ -91,103 +46,31 @@ declare module 'baja-lite-xlsx' {
     headerMap?: Record<string, string>;
   }
 
-  /**
-   * Image data object
-   * 图片数据对象
-   */
-  export interface ImageDataObject {
-    /** Image data as Buffer */
-    data: Buffer;
-    /** Image filename */
-    name: string;
-    /** MIME type */
-    type: string;
-  }
-
-  /**
-   * Read complete Excel file including sheets, images, and image positions
-   * 
-   * @param filepath - Path to the .xlsx file (absolute or relative)
-   * @returns Object containing sheets, images, and imagePositions
-   * @throws {Error} If file not found or cannot be read
-   * 
-   * @example
-   * ```javascript
-   * const { readExcel } = require('baja-lite-xlsx');
-   * const data = readExcel('./sample.xlsx');
-   * console.log(data.sheets[0].name);
-   * console.log(data.images.length);
-   * ```
-   */
-  export function readExcel(filepath: string): ExcelData;
-
-  /**
-   * Extract only images from Excel file
-   * 
-   * @param filepath - Path to the .xlsx file (absolute or relative)
-   * @returns Array of image objects
-   * @throws {Error} If file not found or cannot be read
-   * 
-   * @example
-   * ```javascript
-   * const { extractImages } = require('baja-lite-xlsx');
-   * const images = extractImages('./sample.xlsx');
-   * images.forEach(img => {
-   *   console.log(`${img.name}: ${img.data.length} bytes`);
-   * });
-   * ```
-   */
-  export function extractImages(filepath: string): ImageData[];
-
-  /**
-   * Get all sheet names from Excel file
-   * 获取Excel文件中所有Sheet的名称
-   * 
-   * @param input - Excel file path (string), Buffer, or base64 string
-   * @returns Array of sheet names
-   * @throws {Error} If file not found or cannot be read
-   * 
-   * @example
-   * ```javascript
-   * const { getSheetNames } = require('baja-lite-xlsx');
-   * 
-   * // Using file path
-   * const names1 = getSheetNames('./sample.xlsx');
-   * console.log(names1); // ['Sheet1', 'Sheet2']
-   * 
-   * // Using Buffer
-   * const buffer = fs.readFileSync('./sample.xlsx');
-   * const names2 = getSheetNames(buffer);
-   * 
-   * // Using base64
-   * const base64 = buffer.toString('base64');
-   * const names3 = getSheetNames(base64);
-   * ```
-   */
-  export function getSheetNames(input: string | Buffer): string[];
 
   /**
    * Read Excel table and return as JSON array
    * 读取Excel表格并返回JSON数组
    * 
-   * Images are automatically attached to rows based on their column position.
-   * Two types of images are supported:
-   * - Floating images: Images that span multiple cells
-   * - Embedded images: Images inserted into a cell (displayed as =DISPIMG(...) formula in Excel)
+   * Images are automatically processed and attached to the corresponding cells.
+   * Supports both standard Excel and WPS Excel formats:
+   * - Floating images: Images that span multiple cells (twoCellAnchor)
+   * - Embedded images (Standard Excel): Images anchored to a single cell (oneCellAnchor)
+   * - Embedded images (WPS Excel): Images using DISPIMG formula with cellimages.xml
    * 
-   * Both types are automatically converted to the same object format:
+   * All image types are automatically converted to the same object format:
    * { data: Buffer, name: string, type: string }
    * 
-   * 图片会根据所在列自动附加到行数据。支持两种类型的图片：
-   * - 浮动图片：跨越多个单元格的图片
-   * - 嵌入式图片：插入到单元格内的图片（Excel中显示为 =DISPIMG(...) 公式）
+   * 图片会自动处理并附加到对应的单元格。支持标准 Excel 和 WPS Excel 格式：
+   * - 浮动图片：跨越多个单元格的图片（twoCellAnchor）
+   * - 嵌入式图片（标准 Excel）：锚定到单个单元格的图片（oneCellAnchor）
+   * - 嵌入式图片（WPS Excel）：使用 DISPIMG 公式和 cellimages.xml
    * 
-   * 两种类型都会自动转换为统一的对象格式：
+   * 所有图片类型都会自动转换为统一的对象格式：
    * { data: Buffer, name: string, type: string }
    * 
    * @param input - Excel file path (string), Buffer, or base64 string
    * @param options - Configuration options
-   * @returns Array of objects, each representing a row
+   * @returns Array of objects, each representing a row. Image cells contain ImageDataObject.
    * @throws {Error} If file not found or sheet not found
    * 
    * @example
@@ -231,11 +114,16 @@ declare module 'baja-lite-xlsx' {
    * //     photo2: { data: Buffer, name: 'img2.jpg', type: 'image/jpeg' }
    * //   }
    * // ]
+   * 
+   * // Access image data
+   * if (data1[0].photo1 && data1[0].photo1.data) {
+   *   fs.writeFileSync('output.png', data1[0].photo1.data);
+   * }
    * ```
    */
   export function readTableAsJSON(
     input: string | Buffer,
     options?: ReadTableOptions
-  ): Array<Record<string, any>>;
+  ): Array<Record<string, string | ImageDataObject>>;
 
 }

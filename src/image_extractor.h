@@ -22,6 +22,12 @@ struct DrawingAnchor {
     int toRow;
 };
 
+// WPS Excel embedded image info (from cellimages.xml)
+struct CellImageInfo {
+    std::string imageId;      // e.g., "ID_C6F9C8CE7BB34DB9B1BB9835C5297155"
+    std::string imageName;    // e.g., "image1.png"
+};
+
 class ImageExtractor {
 public:
     ImageExtractor();
@@ -32,10 +38,14 @@ public:
                         std::vector<ImageInfo>& outImages,
                         std::vector<DrawingAnchor>& outAnchors);
     
+    // Get cell image mappings (WPS Excel format)
+    const std::vector<CellImageInfo>& getCellImageMappings() const { return cellImageMappings_; }
+    
     std::string getLastError() const { return lastError_; }
     
 private:
     std::string lastError_;
+    std::vector<CellImageInfo> cellImageMappings_;  // WPS Excel cell image ID to filename mapping
     
     // Helper to read file from ZIP
     bool readFileFromZip(void* zipArchive, const std::string& filename, 
@@ -46,6 +56,11 @@ private:
                         const std::string& sheetName,
                         const std::map<std::string, std::string>& rIdToImageMap,
                         std::vector<DrawingAnchor>& outAnchors);
+    
+    // Parse cellimages.xml (WPS Excel embedded images)
+    bool parseCellImagesXml(const std::string& xmlContent,
+                           const std::map<std::string, std::string>& rIdToImageMap,
+                           std::vector<CellImageInfo>& outCellImages);
     
     // Parse relationship XML to map rId to image filenames
     std::map<std::string, std::string> parseRelationships(const std::string& xmlContent);

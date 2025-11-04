@@ -1,508 +1,286 @@
 # baja-lite-xlsx
 
-A high-performance native Node.js module for reading Excel files and extracting embedded images, powered by xlnt C++ library.
+A lightweight, high-performance Node.js library for reading Excel files with automatic image extraction support. Built with native C++ for maximum speed.
 
-[中文文档](./README.zh-CN.md) | English
+[中文文档](./README.zh-CN.md)
 
 ## Features
 
-- ✅ **Fast & Efficient** - Native C++ implementation for high performance
-- ✅ **Excel Reading** - Read data from Excel files (.xlsx)
-- ✅ **Image Extraction** - Extract embedded images with position information
-- ✅ **Multiple Input Types** - Support file path, Buffer, and base64 string
-- ✅ **Multi-Sheet Support** - Get sheet names and read from specific sheets
-- ✅ **JSON Output** - Easy-to-use JSON API with automatic image attachment
-- ✅ **TypeScript Support** - Full TypeScript type definitions included
-- ✅ **Prebuilt Binaries** - Windows x64 prebuilt packages for Node.js 20+ and Electron 34+
-- ✅ **Electron Support** - Works seamlessly in Electron applications
+- ✅ **Read Excel tables as JSON** - Simple API to convert Excel to JavaScript objects
+- ✅ **Automatic image extraction** - Supports both floating and embedded images
+- ✅ **WPS Excel support** - Fully compatible with WPS Office embedded images (DISPIMG formula)
+- ✅ **High performance** - Native C++ implementation using xlnt library
+- ✅ **TypeScript support** - Full type definitions included
+- ✅ **Multiple input formats** - File path, Buffer, or base64 string
+- ✅ **Cross-platform** - Prebuilt binaries for Windows, Linux, macOS
 
 ## Installation
 
-### Windows + Node.js 20 / Electron 34 (Recommended)
-
-For Windows x64 with Node.js 20+ or Electron 34+, prebuilt binaries are available:
-
 ```bash
 npm install baja-lite-xlsx
 ```
 
-✅ **No build tools required!** The precompiled package will be downloaded automatically.
-
-**Supported prebuilt platforms:**
-- Windows x64 + Node.js 20+
-- Windows x64 + Electron 34+
-
-### Other Environments
-
-For other platforms or Node.js versions, the module will be compiled from source:
-
-```bash
-npm install baja-lite-xlsx
-```
-
-**Requirements for source compilation:**
-
-<details>
-<summary><strong>Windows (Node 16/18 or other versions)</strong></summary>
-
-```bash
-# Install build tools
-npm install -g windows-build-tools
-
-# Install vcpkg (if not already installed)
-git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-cd C:\vcpkg
-.\bootstrap-vcpkg.bat
-
-# Install xlnt library
-.\vcpkg install xlnt:x64-windows
-
-# Set environment variable
-setx VCPKG_ROOT "C:\vcpkg"
-
-# Now install the package
-npm install baja-lite-xlsx
-```
-
-</details>
-
-<details>
-<summary><strong>Linux</strong></summary>
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential cmake git
-npm install baja-lite-xlsx
-```
-
-**CentOS/RHEL:**
-```bash
-sudo yum groupinstall "Development Tools"
-sudo yum install cmake git
-npm install baja-lite-xlsx
-```
-
-</details>
-
-<details>
-<summary><strong>macOS</strong></summary>
-
-```bash
-# Install Xcode Command Line Tools
-xcode-select --install
-
-# Install the package
-npm install baja-lite-xlsx
-```
-
-</details>
+The package includes prebuilt binaries. If a binary isn't available for your platform, it will automatically compile from source (requires build tools).
 
 ## Quick Start
 
 ```javascript
-const { readTableAsJSON, getSheetNames } = require('baja-lite-xlsx');
+const { readTableAsJSON } = require('baja-lite-xlsx');
+const fs = require('fs');
 
-// Get all sheet names
-const sheets = getSheetNames('./data.xlsx');
-console.log('Sheets:', sheets);
-
-// Read Excel as JSON (with automatic image extraction)
-const data = readTableAsJSON('./data.xlsx', {
-  headerRow: 0,           // Header row index (default: 0)
-  headerMap: {            // Map Chinese headers to English keys
+// Read Excel file as JSON
+const data = readTableAsJSON('./sample.xlsx', {
+  headerRow: 0,
+  headerMap: {
     '姓名': 'name',
     '年龄': 'age',
     '照片': 'photo'
   }
 });
 
-console.log(data);
-// Output:
-// [
-//   {
-//     name: 'Alice',
-//     age: '25',
-//     photo: {
-//       data: Buffer,           // Image binary data
-//       name: 'photo1.png',     // Image filename
-//       type: 'image/png'       // MIME type
-//     }
-//   },
-//   ...
-// ]
-```
-
-## API Documentation
-
-### `getSheetNames(input)`
-
-Get all sheet names from an Excel file.
-
-**Parameters:**
-- `input` (string | Buffer): Excel file path, Buffer, or base64 string
-
-**Returns:**
-- `string[]`: Array of sheet names
-
-**Example:**
-```javascript
-const sheets = getSheetNames('./data.xlsx');
-// ['Sheet1', 'Sheet2', 'Sheet3']
-```
-
----
-
-### `readTableAsJSON(input, options?)`
-
-Read Excel data as JSON array with automatic image attachment.
-
-**Parameters:**
-
-- `input` (string | Buffer): Excel file path, Buffer, or base64 string
-- `options` (object, optional):
-  - `sheetName` (string): Sheet name to read (default: first sheet)
-  - `headerRow` (number): Header row index (default: 0)
-  - `headerMap` (object): Map headers to property names
-  - `skipRows` (number[]): Row indices to skip
-
-**Returns:**
-- `object[]`: Array of row objects
-
-**Example:**
-```javascript
-const data = readTableAsJSON('./data.xlsx', {
-  headerRow: 0,
-  headerMap: {
-    '名称': 'name',
-    '年龄': 'age',
-    '照片': 'photo'
-  },
-  skipRows: [1, 2]  // Skip row 2 and 3
+// Access data
+data.forEach(row => {
+  console.log(row.name, row.age);
+  
+  // Images are automatically extracted as { data: Buffer, name, type }
+  if (row.photo && row.photo.data) {
+    fs.writeFileSync(`${row.name}.png`, row.photo.data);
+  }
 });
 ```
 
-**Image Attachment:**
+## API Reference
 
-If your Excel has image columns (e.g., column header is `photo1`), images will be automatically attached to matching rows. Two types of images are supported:
+### `readTableAsJSON(input, options)`
 
-- **Floating Images**: Images that span multiple cells
-- **Embedded Images**: Images inserted into a cell (displayed as `=DISPIMG(...)` formula in Excel)
+Reads an Excel file and returns an array of objects.
 
-Both types of images are automatically converted to a unified object format:
+**Parameters:**
+- `input` (string | Buffer): Excel file path, Buffer, or base64 string
+- `options` (object):
+  - `sheetName` (string): Sheet name to read (defaults to first sheet)
+  - `headerRow` (number): Header row index, 0-based (default: 0)
+  - `skipRows` (number[]): Row indices to skip
+  - `headerMap` (object): Map original headers to new property names
 
+**Returns:** `Array<Object>` - Each object represents a row
+
+**Image Support:**
+- Floating images (twoCellAnchor) ✅
+- Embedded images - Standard Excel (oneCellAnchor) ✅
+- Embedded images - WPS Excel (DISPIMG formula) ✅
+
+All images are returned as:
 ```javascript
 {
-  name: 'Alice',
-  age: '25',
-  photo1: {
-    data: Buffer,           // Image binary data
-    name: 'image1.png',     // Image filename
-    type: 'image/png'       // MIME type (image/png, image/jpeg, etc.)
-  }
+  data: Buffer,      // Image binary data
+  name: 'image.png', // Filename
+  type: 'image/png'  // MIME type
 }
 ```
 
-**Saving Images:**
-```javascript
-const fs = require('fs');
-const data = readTableAsJSON('./data.xlsx');
+## TypeScript Usage
 
-data.forEach((row, i) => {
-  if (row.photo && row.photo.data) {
-    fs.writeFileSync(`./output/photo_${i}.png`, row.photo.data);
+```typescript
+import { readTableAsJSON, ImageDataObject } from 'baja-lite-xlsx';
+
+interface Employee {
+  name: string;
+  age: string;
+  photo: string | ImageDataObject;
+}
+
+const data = readTableAsJSON('./sample.xlsx', {
+  headerMap: {
+    '姓名': 'name',
+    '年龄': 'age',
+    '照片': 'photo'
   }
-});
+}) as Employee[];
 ```
 
----
+## Build from Source
 
-### Input Types
+### Prerequisites
 
-All functions support three input types:
-
-**1. File Path:**
-```javascript
-readTableAsJSON('./data.xlsx');
-```
-
-**2. Buffer:**
-```javascript
-const fs = require('fs');
-const buffer = fs.readFileSync('./data.xlsx');
-readTableAsJSON(buffer);
-```
-
-**3. Base64 String:**
-```javascript
-const base64 = buffer.toString('base64');
-readTableAsJSON(base64);
-```
-
-## Examples
-
-See the [examples](./examples) directory for more detailed usage:
-
-- [basic.js](./examples/basic.js) - Basic usage
-- [json-api.js](./examples/json-api.js) - JSON API with all features
-- [advanced.js](./examples/advanced.js) - Advanced usage
-- [typescript-example.ts](./examples/typescript-example.ts) - TypeScript usage
-- [electron-example.js](./examples/electron-example.js) - Electron application usage
-
-Run examples:
+#### Windows
 ```bash
-npm run example          # Basic example
-npm run example:json     # JSON API example
-npm run example:advanced # Advanced example
+# 1. Install Visual Studio Build Tools 2019+
+# Download from: https://visualstudio.microsoft.com/downloads/
+
+# 2. Install vcpkg
+cd C:\
+git clone https://github.com/Microsoft/vcpkg.git
+cd vcpkg
+.\bootstrap-vcpkg.bat
+
+# 3. Install dependencies
+.\vcpkg install xlnt:x64-windows
+.\vcpkg install libzip:x64-windows
+
+# 4. Set environment variable
+set VCPKG_ROOT=C:\vcpkg
 ```
 
-## Developer Guide
-
-### Local Development
-
-**1. Clone the repository:**
+Or use the automated script:
 ```bash
+check-vcpkg.bat
+```
+
+#### Linux
+```bash
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install build-essential
+sudo apt-get install libxlnt-dev libzip-dev
+
+# Fedora/RHEL
+sudo dnf install gcc-c++ make
+sudo dnf install xlnt-devel libzip-devel
+```
+
+#### macOS
+```bash
+# Install Xcode Command Line Tools
+xcode-select --install
+
+# Install dependencies via Homebrew
+brew install xlnt libzip
+```
+
+### Compile
+
+```bash
+# Clone repository
 git clone https://github.com/void-soul/baja-lite-xlsx.git
 cd baja-lite-xlsx
-```
 
-**2. Install dependencies:**
-```bash
+# Install dependencies
 npm install
-```
 
-**3. Set up build environment:**
-
-See [Installation - Other Environments](#other-environments) for platform-specific build tools.
-
-**4. Build the module:**
-```bash
+# Build native module
 npm run build
+
+# Or use the local build script (Windows)
+build-local.bat
 ```
 
-**5. Run tests:**
+## Create Prebuilt Packages
+
+For library maintainers who want to create prebuilt binaries:
+
+### Windows
 ```bash
-npm test
+# Run the prebuild script
+scripts\create-prebuilds.bat
+
+# This will:
+# 1. Clean old builds
+# 2. Compile the native module
+# 3. Copy DLL files
+# 4. Create .tar.gz packages for N-API and Electron
+# 5. Package DLL files into the archives
 ```
 
-### Building Prebuilt Binaries
+The prebuilt packages will be in the `prebuilds/` directory.
 
-**Build for current platform:**
+## Publishing
+
+### Publish to npm
+
 ```bash
-npm run prebuild
-```
-
-This generates a prebuilt package in the `prebuilds/` directory:
-```
-prebuilds/baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz
-```
-
-**Build for specific runtime:**
-```bash
-# For Node.js (N-API)
-npx prebuild --runtime napi --target 8
-
-# For Electron
-npx prebuild --runtime electron --target 34.0
-```
-
-### Publishing to npm
-
-This project uses **prebuild** mechanism (similar to better-sqlite3) to provide precompiled binaries.
-
-**Complete publishing workflow:**
-
-**1. Update version:**
-```bash
+# 1. Update version in package.json
 npm version patch  # or minor, major
-```
 
-**2. Push code and tags:**
-```bash
-git push origin master --tags
-```
+# 2. Build prebuilt packages
+scripts\create-prebuilds.bat
 
-**3. Wait for GitHub Actions:**
-
-The GitHub Actions workflow will automatically:
-- ✅ Build precompiled binaries for Windows x64 + Node.js (N-API v8)
-- ✅ Build precompiled binaries for Windows x64 + Electron 34
-- ✅ Create a GitHub Release (e.g., `v1.0.x`)
-- ✅ Upload `.tar.gz` packages to the release
-
-View progress at: `https://github.com/void-soul/baja-lite-xlsx/actions`
-
-**4. Verify the release:**
-
-Check that the release was created successfully:
-```
-https://github.com/void-soul/baja-lite-xlsx/releases/tag/v1.0.x
-```
-
-Expected files:
-- `baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz`
-
-**5. Publish to npm:**
-```bash
+# 3. Publish to npm
 npm publish
 ```
 
-**6. Test installation:**
+### Publish to GitHub Releases
 
-In a clean environment:
-```bash
-npm install baja-lite-xlsx@latest
-```
+The library uses GitHub Releases to host prebuilt binaries. The workflow:
 
-The package should download the prebuilt binary automatically (no compilation needed).
-
----
-
-### Prebuilt Binary Mechanism
-
-This project follows **better-sqlite3**'s prebuild approach:
-
-**How it works:**
-
-1. **Installation phase:**
+1. **Create prebuilt packages locally:**
    ```bash
-   npm install baja-lite-xlsx
+   scripts\create-prebuilds.bat
    ```
 
-2. **prebuild-install** tries to download prebuilt binary:
+2. **Create a git tag:**
+   ```bash
+   git tag v1.0.16
+   git push origin v1.0.16
    ```
-   URL: https://github.com/void-soul/baja-lite-xlsx/releases/download/v1.0.x/baja-lite-xlsx-v1.0.x-napi-v8-win32-x64.tar.gz
+
+3. **Upload to GitHub Releases:**
+   - Go to: https://github.com/void-soul/baja-lite-xlsx/releases
+   - Click "Create a new release"
+   - Select your tag (e.g., v1.0.16)
+   - Upload files from `prebuilds/` directory
+   - Publish release
+
+4. **GitHub Actions (Automated):**
+
+   You can also use GitHub Actions to automate the build and release process. Create `.github/workflows/release.yml`:
+
+   ```yaml
+   name: Build and Release
+   
+   on:
+     push:
+       tags:
+         - 'v*'
+   
+   jobs:
+     build-windows:
+       runs-on: windows-latest
+       steps:
+         - uses: actions/checkout@v3
+         - uses: actions/setup-node@v3
+           with:
+             node-version: '20'
+         
+         - name: Setup vcpkg
+           run: |
+             git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+             C:\vcpkg\bootstrap-vcpkg.bat
+             C:\vcpkg\vcpkg install xlnt:x64-windows libzip:x64-windows
+           
+         - name: Build
+           run: |
+             set VCPKG_ROOT=C:\vcpkg
+             npm install
+             npm run prebuild
+           
+         - name: Upload Release Assets
+           uses: actions/upload-release-asset@v1
+           env:
+             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+           with:
+             upload_url: ${{ github.event.release.upload_url }}
+             asset_path: ./prebuilds/*.tar.gz
+             asset_name: prebuild-${{ matrix.os }}.tar.gz
+             asset_content_type: application/gzip
    ```
 
-3. **If download succeeds:**
-   - Extracts to `build/Release/baja_xlsx.node`
-   - ✅ Installation complete (fast)
+## Examples
 
-4. **If download fails:**
-   - Falls back to `node-gyp rebuild`
-   - Compiles from source (requires build tools)
-
-**Configuration** (`package.json`):
-```json
-{
-  "binary": {
-    "napi_versions": [8],
-    "module_name": "baja_xlsx",
-    "module_path": "./build/Release/",
-    "host": "https://github.com/void-soul/baja-lite-xlsx/releases/download/",
-    "remote_path": "v{version}",
-    "package_name": "{name}-v{version}-napi-v{abi}-{platform}-{arch}.tar.gz"
-  },
-  "scripts": {
-    "install": "prebuild-install --runtime napi || node-gyp rebuild",
-    "prebuild": "prebuild --runtime napi --target 8 --strip"
-  }
-}
-```
-
-**URL construction:**
-```
-{host}{remote_path}/{package_name}
-↓
-https://github.com/void-soul/baja-lite-xlsx/releases/download/v1.0.11/baja-lite-xlsx-v1.0.11-napi-v8-win32-x64.tar.gz
-```
-
-**Key variables:**
-- `{version}` → `1.0.11` (from package.json)
-- `{abi}` → `8` (N-API version)
-- `{platform}` → `win32`, `linux`, `darwin`
-- `{arch}` → `x64`, `arm64`
-
-**GitHub Actions workflow:**
-
-Triggered on tag push (`v*`):
-```yaml
-on:
-  push:
-    tags:
-      - 'v*'
-
-jobs:
-  build:
-    runs-on: windows-latest
-    steps:
-      - name: Build prebuilds
-        run: npm run prebuild
-      
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: prebuilds/*.tar.gz
-```
-
-**Workflow file:** [`.github/workflows/prebuild.yml`](./.github/workflows/prebuild.yml)
-
-## Technical Details
-
-**Core Dependencies:**
-- [xlnt](https://github.com/tfussell/xlnt) - C++ library for Excel file manipulation
-- [libzip](https://libzip.org/) - ZIP file handling (Excel files are ZIP archives)
-- [node-addon-api](https://github.com/nodejs/node-addon-api) - N-API C++ wrapper
-
-**Build System:**
-- `node-gyp` - Native addon build tool
-- `prebuild` - Precompiled binary creation
-- `prebuild-install` - Automatic precompiled binary installation
-
-**Supported Platforms:**
-- Windows (x64)
-- Linux (x64, ARM64)
-- macOS (x64, ARM64)
-
-**Supported Runtimes:**
-- Node.js 16.x+
-- Node.js 18.x+
-- Node.js 20.x+ (prebuilt binaries available for Windows x64)
-- Electron 34.x+ (prebuilt binaries available for Windows x64)
-
-## Troubleshooting
-
-<details>
-<summary><strong>Build fails on Windows</strong></summary>
-
-1. Ensure Visual Studio 2019+ or Build Tools for Visual Studio is installed
-2. Check that `vcpkg` is properly installed and `VCPKG_ROOT` environment variable is set
-3. Verify xlnt is installed: `C:\vcpkg\vcpkg list`
-4. Try rebuilding: `npm run clean && npm run build`
-
-</details>
-
-<details>
-<summary><strong>Module not found after installation</strong></summary>
-
-1. Check that the module is installed: `npm list baja-lite-xlsx`
-2. Try reinstalling: `npm uninstall baja-lite-xlsx && npm install baja-lite-xlsx`
-3. Clear npm cache: `npm cache clean --force`
-
-</details>
-
-<details>
-<summary><strong>Prebuilt binary not found</strong></summary>
-
-This is expected for non-Windows or non-Node 20 environments. The module will automatically fall back to building from source. Ensure you have the required build tools installed.
-
-</details>
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+See the `examples/` directory for more usage examples:
+- `basic.js` - Basic usage
+- `json-api.js` - JSON API with image extraction
+- `advanced.js` - Advanced features
+- `typescript-example.ts` - TypeScript example
 
 ## License
 
-MIT License - see [LICENSE](./LICENSE) file for details.
+MIT
 
 ## Author
 
 DEDEDE
 
-## Links
+## Repository
 
-- [GitHub Repository](https://github.com/void-soul/baja-lite-xlsx)
-- [npm Package](https://www.npmjs.com/package/baja-lite-xlsx)
-- [Report Issues](https://github.com/void-soul/baja-lite-xlsx/issues)
-- [Changelog](./CHANGELOG.md)
+https://github.com/void-soul/baja-lite-xlsx
