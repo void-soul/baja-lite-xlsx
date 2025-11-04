@@ -184,7 +184,12 @@ const data = readTableAsJSON('./data.xlsx', {
 
 **Image Attachment:**
 
-If your Excel has image columns (e.g., column header is `photo1`), images will be automatically attached to matching rows:
+If your Excel has image columns (e.g., column header is `photo1`), images will be automatically attached to matching rows. Two types of images are supported:
+
+- **Floating Images**: Images that span multiple cells
+- **Embedded Images**: Images inserted into a cell (displayed as `=DISPIMG(...)` formula in Excel)
+
+Both types of images are automatically converted to a unified object format:
 
 ```javascript
 {

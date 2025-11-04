@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- 🐛 Fixed embedded image handling in `readTableAsJSON()` - now correctly converts `=DISPIMG(...)` formulas to image objects with `{ data: Buffer, name: string, type: string }` format, matching the behavior of floating images
+  - **C++ xlsx_reader.cpp**: Modified `cellToString()` to return `__IMAGE_CELL__` marker for DISPIMG formulas
+  - **C++ addon.cpp**: Modified `sheetsToArray()` to handle ALL images (both embedded and floating) - directly creates Buffer objects in cell data
+  - **JavaScript layer**: Removed all image processing logic (~80 lines) - images are already in cell data, no searching/matching needed
+  - Significant performance improvement by moving all image processing to C++ layer
+
 ## [1.0.7] - 2025-10-20
 
 ### Added

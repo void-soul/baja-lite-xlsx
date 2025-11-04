@@ -4,8 +4,24 @@
 using namespace Napi;
 using namespace baja_xlsx;
 
+// Helper function to create image object
+Object createImageObject(Env env, const ImageData& img) {
+    Object imgObj = Object::New(env);
+    imgObj.Set("name", String::New(env, img.name));
+    imgObj.Set("type", String::New(env, img.type));
+    
+    Buffer<uint8_t> buffer = Buffer<uint8_t>::Copy(env,
+        img.data.data(),
+        img.data.size());
+    imgObj.Set("data", buffer);
+    
+    return imgObj;
+}
+
 // Helper function to convert C++ vector to JS array
-Array sheetsToArray(Env env, const std::vector<SheetData>& sheets) {
+Array sheetsToArray(Env env, const std::vector<SheetData>& sheets, 
+                    const std::vector<ImageData>& images,
+                    const std::vector<ImagePosition>& positions) {
     Array result = Array::New(env, sheets.size());
     
     for (size_t i = 0; i < sheets.size(); ++i) {
@@ -16,10 +32,103 @@ Array sheetsToArray(Env env, const std::vector<SheetData>& sheets) {
         for (size_t row = 0; row < sheets[i].data.size(); ++row) {
             Array rowArray = Array::New(env, sheets[i].data[row].size());
             for (size_t col = 0; col < sheets[i].data[row].size(); ++col) {
-                rowArray.Set(col, String::New(env, sheets[i].data[row][col]));
+                const std::string& cellValue = sheets[i].data[row][col];
+                
+                // Check if this is an embedded image cell marker
+                if (cellValue == "__IMAGE_CELL__") {
+                    // Find the image for this cell position
+                    bool imageFound = false;
+                    
+                    for (const auto& pos : positions) {
+                        // Match by sheet name and cell position
+                        if (pos.sheetName == sheets[i].name &&
+                            pos.fromRow == static_cast<int>(row) &&
+                            pos.fromCol == static_cast<int>(col)) {
+                            
+                            // Find the corresponding image
+                            for (const auto& img : images) {
+                                if (img.name == pos.imageName) {
+                                    rowArray.Set(col, createImageObject(env, img));
+                                    imageFound = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (imageFound) break;
+                        }
+                    }
+                    
+                    // If image not found, set empty string
+                    if (!imageFound) {
+                        rowArray.Set(col, String::New(env, ""));
+                    }
+                } else {
+                    // Normal cell - set string value
+                    rowArray.Set(col, String::New(env, cellValue));
+                }
             }
             dataArray.Set(row, rowArray);
         }
+        
+        // After filling all cells, process floating images
+        // Floating images are added to cells based on their top-left position
+        for (const auto& pos : positions) {
+            if (pos.sheetName != sheets[i].name) {
+                continue;
+            }
+            
+            // Check if this is a floating image (not embedded)
+            // Embedded images have fromRow == toRow and fromCol == toCol
+            bool isEmbedded = (pos.fromRow == pos.toRow && pos.fromCol == pos.toCol);
+            
+            if (!isEmbedded) {
+                // This is a floating image
+                // Only attach to the top-left cell
+                int targetRow = pos.fromRow;
+                int targetCol = pos.fromCol;
+                
+                // Check if row and col are valid
+                if (targetRow >= 0 && targetRow < static_cast<int>(sheets[i].data.size())) {
+                    if (targetCol >= 0 && targetCol < static_cast<int>(sheets[i].data[targetRow].size())) {
+                        // Find the image data
+                        for (const auto& img : images) {
+                            if (img.name == pos.imageName) {
+                                // Get the row array
+                                Array rowArray = dataArray.Get(targetRow).As<Array>();
+                                Value currentValue = rowArray.Get(targetCol);
+                                
+                                // Check if this cell already has an image
+                                if (currentValue.IsObject()) {
+                                    Object currentObj = currentValue.As<Object>();
+                                    if (currentObj.Has("data") && currentObj.Get("data").IsBuffer()) {
+                                        // Cell already has an image, convert to array
+                                        Array imgArray;
+                                        if (currentObj.IsArray()) {
+                                            imgArray = currentObj.As<Array>();
+                                        } else {
+                                            imgArray = Array::New(env, 1);
+                                            imgArray.Set(uint32_t(0), currentObj);
+                                        }
+                                        // Add new image
+                                        imgArray.Set(imgArray.Length(), createImageObject(env, img));
+                                        rowArray.Set(targetCol, imgArray);
+                                    } else {
+                                        // Not an image object, replace with image
+                                        rowArray.Set(targetCol, createImageObject(env, img));
+                                    }
+                                } else {
+                                    // No image yet, set it
+                                    rowArray.Set(targetCol, createImageObject(env, img));
+                                }
+                                
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         sheetObj.Set("data", dataArray);
         result.Set(i, sheetObj);
     }
@@ -90,7 +199,7 @@ Value ReadExcel(const CallbackInfo& info) {
     }
     
     Object result = Object::New(env);
-    result.Set("sheets", sheetsToArray(env, data.sheets));
+    result.Set("sheets", sheetsToArray(env, data.sheets, data.images, data.imagePositions));
     result.Set("images", imagesToArray(env, data.images));
     result.Set("imagePositions", positionsToArray(env, data.imagePositions));
     

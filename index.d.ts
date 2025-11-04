@@ -170,15 +170,20 @@ declare module 'baja-lite-xlsx' {
    * Read Excel table and return as JSON array
    * 读取Excel表格并返回JSON数组
    * 
-   * Images are automatically attached to rows based on their column position:
-   * - Floating images: Use top-left corner coordinates (from.col, from.row)
-   * - Embedded images: Use the cell they are in (from.col, from.row)
-   * - Image property name is determined by the column header
+   * Images are automatically attached to rows based on their column position.
+   * Two types of images are supported:
+   * - Floating images: Images that span multiple cells
+   * - Embedded images: Images inserted into a cell (displayed as =DISPIMG(...) formula in Excel)
    * 
-   * 图片会根据所在列自动附加到行数据：
-   * - 浮动图片：使用左上角坐标所在的列和行（from.col, from.row）
-   * - 内嵌图片：使用图所在单元格的列和行（from.col, from.row）
-   * - 图片属性名由该列的表头决定
+   * Both types are automatically converted to the same object format:
+   * { data: Buffer, name: string, type: string }
+   * 
+   * 图片会根据所在列自动附加到行数据。支持两种类型的图片：
+   * - 浮动图片：跨越多个单元格的图片
+   * - 嵌入式图片：插入到单元格内的图片（Excel中显示为 =DISPIMG(...) 公式）
+   * 
+   * 两种类型都会自动转换为统一的对象格式：
+   * { data: Buffer, name: string, type: string }
    * 
    * @param input - Excel file path (string), Buffer, or base64 string
    * @param options - Configuration options

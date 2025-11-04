@@ -34,8 +34,24 @@ std::string XlsxReader::cellToString(const xlnt::cell& cell) {
                     return cell.value<bool>() ? "true" : "false";
                 case xlnt::cell_type::shared_string:
                 case xlnt::cell_type::inline_string:
-                case xlnt::cell_type::formula_string:
                     return cell.to_string();
+                case xlnt::cell_type::formula_string: {
+                    // Get the formula string
+                    std::string formula = cell.to_string();
+                    
+                    // Check if it's an embedded image formula (DISPIMG)
+                    // These formulas look like: =DISPIMG("ID_...", 1)
+                    if (formula.find("DISPIMG") != std::string::npos) {
+                        // Return a special marker for embedded images
+                        // Format: __IMAGE_CELL__
+                        // The JS layer will detect this marker and replace it with the image data
+                        // by matching the cell position with imagePositions
+                        return "__IMAGE_CELL__";
+                    }
+                    
+                    // For other formulas, return the formula string
+                    return formula;
+                }
                 case xlnt::cell_type::date:
                     return cell.to_string();
                 default:

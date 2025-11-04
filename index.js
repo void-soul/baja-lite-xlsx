@@ -258,6 +258,7 @@ function readTableAsJSON(input, options = {}) {
     const rowObj = {};
     
     // 填充数据
+    // 注意：所有图片（嵌入式和浮动图片）都已经在 C++ 层直接转换为 { data: Buffer, name, type } 对象
     for (let colIndex = 0; colIndex < mappedHeaders.length; colIndex++) {
       const header = mappedHeaders[colIndex];
       const value = row[colIndex] || '';
@@ -266,53 +267,6 @@ function readTableAsJSON(input, options = {}) {
       if (header) {
         rowObj[header] = value;
       }
-    }
-    
-    // 处理图片
-    // 查找该行对应的图片（行号从1开始，因为Excel是1-based）
-    const excelRowNumber = rowIndex + 1;
-    const rowImages = findImagesForRow(
-      excelData.images,
-      excelData.imagePositions,
-      targetSheet.name,
-      excelRowNumber
-    );
-    
-    // 根据图片所在列的表头添加图片属性
-    if (rowImages.length > 0) {
-      rowImages.forEach(img => {
-        // img.col 是0-based的列索引
-        const colIndex = img.col;
-        
-        // 获取该列的表头（映射后的）
-        if (colIndex < mappedHeaders.length) {
-          const columnHeader = mappedHeaders[colIndex];
-          
-          if (columnHeader) {
-            // 检查该列是否已有图片
-            if (rowObj[columnHeader] && typeof rowObj[columnHeader] === 'object' && rowObj[columnHeader].data) {
-              // 该列已有图片，转换为数组
-              if (!Array.isArray(rowObj[columnHeader])) {
-                const existing = rowObj[columnHeader];
-                rowObj[columnHeader] = [existing];
-              }
-              // 添加新图片
-              rowObj[columnHeader].push({
-                data: img.data,
-                name: img.name,
-                type: img.type
-              });
-            } else {
-              // 该列还没有图片，直接添加
-              rowObj[columnHeader] = {
-                data: img.data,
-                name: img.name,
-                type: img.type
-              };
-            }
-          }
-        }
-      });
     }
     
     result.push(rowObj);
@@ -324,79 +278,6 @@ function readTableAsJSON(input, options = {}) {
   }
 }
 
-/**
- * 查找指定行的图片
- * @private
- * 图片识别规则：
- * 1. 浮动图片：使用左上角坐标（from）所在的行和列
- * 2. 内嵌图片：使用图片所在单元格的行和列
- */
-function findImagesForRow(images, imagePositions, sheetName, rowNumber) {
-  const rowImages = [];
-  
-  // 遍历所有图片位置
-  for (const pos of imagePositions) {
-    // 检查是否在目标Sheet
-    if (pos.sheet !== sheetName) {
-      continue;
-    }
-    
-    // 转换为1-based行号
-    const imageStartRow = pos.from.row + 1;
-    const imageEndRow = pos.to.row + 1;
-    const imageStartCol = pos.from.col;
-    const imageEndCol = pos.to.col;
-    
-    // 判断图片是否在该行
-    let isInRow = false;
-    let imageCol = imageStartCol; // 默认使用左上角的列
-    
-    // 情况1: 内嵌图片 - 起始行和结束行相同
-    if (imageStartRow === imageEndRow && imageStartRow === rowNumber) {
-      isInRow = true;
-      // 内嵌图片：使用图片所在单元格的列（左上角）
-      imageCol = imageStartCol;
-    }
-    // 情况2: 浮动图片 - 跨越多行
-    else if (rowNumber >= imageStartRow && rowNumber <= imageEndRow) {
-      // 浮动图片：只在左上角所在行识别
-      if (rowNumber === imageStartRow) {
-        isInRow = true;
-        // 浮动图片：使用左上角坐标的列
-        imageCol = imageStartCol;
-      }
-    }
-    
-    if (isInRow) {
-      // 找到对应的图片数据
-      // 优先精确匹配，然后尝试包含匹配
-      let image = images.find(img => img.name === pos.image);
-      
-      if (!image) {
-        // 如果精确匹配失败，尝试包含匹配（但要求双方都非空）
-        image = images.find(img => 
-          img.name && pos.image && 
-          (img.name.includes(pos.image) || pos.image.includes(img.name))
-        );
-      }
-      
-      if (image) {
-        rowImages.push({
-          data: image.data,
-          name: image.name,
-          type: image.type,
-          col: imageCol, // 图片所在列（0-based）
-          position: pos
-        });
-      }
-    }
-  }
-  
-  // 按列排序
-  rowImages.sort((a, b) => a.col - b.col);
-  
-  return rowImages;
-}
 
 module.exports = {
   // 原始API
