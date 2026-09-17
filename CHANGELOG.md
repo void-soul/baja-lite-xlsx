@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.21 (2026-09-18) — performance
+
+- `npm run bench [file] [--iterations N] [--batch N]`: reports best/median wall
+  time, rows per second and retained memory for the buffered, image-less,
+  column-projected and streamed paths, so the options above can be measured
+  against a real workbook instead of trusted.
+- The design notes and the remaining SAX-reader plan live in
+  `docs/plans/2026-09-17-performance-design.md`.
+
 ## 1.0.20 (2026-09-18) — performance
 
 New option:
