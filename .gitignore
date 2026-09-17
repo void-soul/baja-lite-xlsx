@@ -23,4 +23,8 @@ Thumbs.db
 # Test outputs
 test/output/
 
+# Local-only working documents (audit reports, scratch notes)
+docs/
+qa.db
+
 

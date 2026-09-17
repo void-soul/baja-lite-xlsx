@@ -2,6 +2,7 @@
 #include "zip_reader.h"
 #include "xml_parsers.h"
 #include <algorithm>
+#include <cctype>
 
 namespace baja_xlsx {
 

@@ -1,5 +1,6 @@
 #include "zip_reader.h"
 #include "xml_parsers.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

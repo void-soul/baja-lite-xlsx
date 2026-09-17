@@ -1,8 +1,10 @@
 #include <napi.h>
 #include "xlsx_reader.h"
 
+#include <cmath>
 #include <map>
 #include <string>
+#include <utility>
 
 using namespace Napi;
 using namespace baja_xlsx;
