@@ -2,11 +2,12 @@
 #include "image_extractor.h"
 #include "zip_reader.h"
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <sstream>
+#include <string>
 #include <utility>
 
 namespace baja_xlsx {
@@ -16,13 +17,23 @@ namespace {
 // Shortest round-trip formatting for doubles; replaces the previous
 // std::to_string(double) which forced 6 fixed decimals
 // (AUDIT-20260917-023).
+//
+// Deliberately NOT std::to_chars: libc++ marks the floating-point overload
+// as available only since macOS 13.3, so it breaks the 10.15 deployment
+// target. The precision loop picks the shortest representation (15..17
+// significant digits) that still parses back to the same value, which is
+// identical on every toolchain.
 std::string formatDouble(double v) {
-    char buf[64];
-    auto res = std::to_chars(buf, buf + sizeof(buf), v);
-    if (res.ec == std::errc()) {
-        return std::string(buf, res.ptr);
+    if (!std::isfinite(v)) {
+        return std::string();
     }
-    std::snprintf(buf, sizeof(buf), "%g", v);
+    char buf[64];
+    for (int precision = 15; precision <= 17; ++precision) {
+        std::snprintf(buf, sizeof(buf), "%.*g", precision, v);
+        if (std::strtod(buf, nullptr) == v) {
+            break;
+        }
+    }
     return std::string(buf);
 }
 
