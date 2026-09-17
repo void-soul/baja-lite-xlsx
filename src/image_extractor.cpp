@@ -19,6 +19,35 @@ std::string toLowerAscii(std::string s) {
     return s;
 }
 
+// OPC requires '/' as the ZIP entry separator, but some producers (notably
+// WPS) write '\\'. Normalize for pattern matching; the raw name is still
+// used for zip lookups, which must match the archive byte-for-byte.
+std::string normalizeEntryName(const std::string& name) {
+    std::string out = name;
+    std::replace(out.begin(), out.end(), '\\', '/');
+    return out;
+}
+
+// Reads an entry addressed by its canonical ('/') path even when the
+// archive stored it with a different separator.
+bool readFileByName(zip_t* za, const std::string& wanted,
+                    std::vector<uint8_t>& out, size_t maxBytes,
+                    std::string& error) {
+    if (zipio::readFile(za, wanted, out, maxBytes, error)) {
+        return true;
+    }
+    const zip_int64_t numEntries = zip_get_num_entries(za, 0);
+    for (zip_int64_t i = 0; i < numEntries; ++i) {
+        const char* entryName = zip_get_name(za, i, 0);
+        if (!entryName) continue;
+        if (normalizeEntryName(entryName) == wanted) {
+            return zipio::readFile(za, entryName, out, maxBytes, error);
+        }
+    }
+    error.clear();
+    return false;
+}
+
 } // namespace
 
 std::string ImageExtractor::getContentType(const std::string& extension) {
@@ -40,7 +69,7 @@ std::map<std::string, std::string> ImageExtractor::buildDrawingSheetMap(
     std::string err;
 
     // 1) xl/workbook.xml: sheet name + r:id
-    if (!zipio::readFile(za, "xl/workbook.xml", data, kMaxXmlBytes, err)) {
+    if (!readFileByName(za, "xl/workbook.xml", data, kMaxXmlBytes, err)) {
         warnings.push_back("workbook.xml missing; drawings cannot be mapped to sheets");
         return drawingToSheet;
     }
@@ -60,7 +89,7 @@ std::map<std::string, std::string> ImageExtractor::buildDrawingSheetMap(
     }
 
     // 2) xl/_rels/workbook.xml.rels: rId -> "worksheets/sheetN.xml"
-    if (!zipio::readFile(za, "xl/_rels/workbook.xml.rels", data, kMaxXmlBytes, err)) {
+    if (!readFileByName(za, "xl/_rels/workbook.xml.rels", data, kMaxXmlBytes, err)) {
         warnings.push_back("workbook.xml.rels missing; drawings cannot be mapped to sheets");
         return drawingToSheet;
     }
@@ -81,12 +110,13 @@ std::map<std::string, std::string> ImageExtractor::buildDrawingSheetMap(
     for (zip_int64_t i = 0; i < numEntries; ++i) {
         const char* entryName = zip_get_name(za, i, 0);
         if (!entryName) continue;
-        const std::string filename(entryName);
+        const std::string rawName(entryName);
+        const std::string filename = normalizeEntryName(rawName);
         if (filename.find("xl/worksheets/_rels/") != 0) continue;
         if (filename.find(".xml.rels") == std::string::npos) continue;
 
         std::vector<uint8_t> relData;
-        if (!zipio::readFile(za, filename, relData, kMaxXmlBytes, err)) {
+        if (!zipio::readFile(za, rawName, relData, kMaxXmlBytes, err)) {
             warnings.push_back("Failed to read worksheet relationships: " + filename);
             continue;
         }
@@ -280,12 +310,13 @@ bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
     for (zip_int64_t i = 0; i < numEntries; ++i) {
         const char* entryName = zip_get_name(za, i, 0);
         if (!entryName) continue;
-        const std::string filename(entryName);
+        const std::string rawName(entryName);
+        const std::string filename = normalizeEntryName(rawName);
 
         if (filename.find("xl/drawings/_rels/") == 0 &&
             filename.find(".xml.rels") != std::string::npos) {
             std::vector<uint8_t> xmlData;
-            if (zipio::readFile(za, filename, xmlData, kMaxXmlBytes, err)) {
+            if (zipio::readFile(za, rawName, xmlData, kMaxXmlBytes, err)) {
                 const std::string xmlContent(xmlData.begin(), xmlData.end());
                 const size_t lastSlash = filename.find_last_of('/');
                 const std::string baseName = (lastSlash != std::string::npos)
@@ -300,7 +331,7 @@ bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
             }
         } else if (filename == "xl/_rels/cellimages.xml.rels") {
             std::vector<uint8_t> xmlData;
-            if (zipio::readFile(za, filename, xmlData, kMaxXmlBytes, err)) {
+            if (zipio::readFile(za, rawName, xmlData, kMaxXmlBytes, err)) {
                 const std::string xmlContent(xmlData.begin(), xmlData.end());
                 cellImagesRelsMap = xmlp::parseRelationships(xmlContent);
             } else {
@@ -313,11 +344,12 @@ bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
     for (zip_int64_t i = 0; i < numEntries; ++i) {
         const char* entryName = zip_get_name(za, i, 0);
         if (!entryName) continue;
-        const std::string filename(entryName);
+        const std::string rawName(entryName);
+        const std::string filename = normalizeEntryName(rawName);
 
         if (filename.find("xl/media/") == 0) {
             ImageInfo img;
-            if (zipio::readFile(za, filename, img.data, kMaxMediaBytes, err)) {
+            if (zipio::readFile(za, rawName, img.data, kMaxMediaBytes, err)) {
                 if (img.data.empty()) {
                     warnings.push_back("Empty media entry skipped: " + filename);
                     continue;
@@ -341,7 +373,7 @@ bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
             filename.find(".xml") != std::string::npos &&
             filename.find(".rels") == std::string::npos) {
             std::vector<uint8_t> xmlData;
-            if (!zipio::readFile(za, filename, xmlData, kMaxXmlBytes, err)) {
+            if (!zipio::readFile(za, rawName, xmlData, kMaxXmlBytes, err)) {
                 warnings.push_back("Failed to read drawing XML: " + filename + " (" + err + ")");
                 continue;
             }
@@ -377,7 +409,7 @@ bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
 
         if (filename == "xl/cellimages.xml") {
             std::vector<uint8_t> xmlData;
-            if (zipio::readFile(za, filename, xmlData, kMaxXmlBytes, err)) {
+            if (zipio::readFile(za, rawName, xmlData, kMaxXmlBytes, err)) {
                 const std::string xmlContent(xmlData.begin(), xmlData.end());
                 parseCellImagesXml(xmlContent, cellImagesRelsMap, outCellImages, warnings);
             } else {

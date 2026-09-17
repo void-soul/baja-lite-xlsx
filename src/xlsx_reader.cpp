@@ -94,6 +94,7 @@ bool XlsxReader::load(const std::string& filepath) {
         // the ORIGINAL file, so nothing is lost there.
         std::string tempPath;
         std::string sanitizeError;
+        std::string retryNote;
         if (zipio::createSanitizedCopy(filepath, tempPath, sanitizeError)) {
             try {
                 workbook_.load(tempPath);
@@ -101,17 +102,23 @@ bool XlsxReader::load(const std::string& filepath) {
                 lastError_.clear();
                 warnings_.push_back(
                     "Loaded via sanitized copy: non-standard workbook relationship "
-                    "types were stripped (xlnt error: " + firstError + ")");
+                    "types / content types were stripped (xlnt error: " + firstError + ")");
                 std::remove(tempPath.c_str());
                 return true;
+            } catch (const std::exception& secondError) {
+                retryNote = std::string("sanitized copy still rejected: ") + secondError.what();
             } catch (...) {
-                std::remove(tempPath.c_str());
+                retryNote = "sanitized copy still rejected (unknown error)";
             }
+            std::remove(tempPath.c_str());
+        } else {
+            retryNote = "sanitized copy not created: " + sanitizeError;
         }
 
         // AUDIT-20260917-001 is addressed by callers on Windows: pass a
         // filesystem path encoded for the platform (see index.js and README).
-        lastError_ = std::string("FILE_OPEN_FAILED|Failed to load file: ") + firstError;
+        lastError_ = std::string("FILE_OPEN_FAILED|Failed to load file: ") + firstError +
+                     " [" + retryNote + "]";
         loaded_ = false;
         return false;
     }
