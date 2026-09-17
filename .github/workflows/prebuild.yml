@@ -178,7 +178,11 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: prebuilds/*
+          # Only assets for THIS tag version; prebuilds/ in the repo may hold
+          # archives from earlier releases (they must not be re-published).
+          files: |
+            prebuilds/*-${{ github.ref_name }}*.tar.gz
+            prebuilds/checksums.txt
           draft: false
           prerelease: false
           body: |
