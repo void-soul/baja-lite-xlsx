@@ -89,50 +89,66 @@ XlsxReader::XlsxReader() : loaded_(false) {
 }
 
 bool XlsxReader::load(const std::string& filepath) {
+    // Capture ANY failure of the first attempt: xlnt can also throw
+    // non-std::exception types, and only catching both lets the sanitized
+    // fallback below actually run.
+    std::string firstError;
+    bool firstOk = false;
     try {
         workbook_.load(filepath);
+        firstOk = true;
+    } catch (const std::exception& e) {
+        firstError = e.what();
+    } catch (...) {
+        firstError = "unknown non-std exception";
+    }
+
+    if (firstOk) {
         loaded_ = true;
         lastError_.clear();
         return true;
-    } catch (const std::exception& e) {
-        const std::string firstError = e.what();
-
-        // Vendor extensions break xlnt: WPS writes proprietary relationship
-        // types (e.g. http://www.wps.cn/officeDocument/2020/cellImage) which
-        // make it abort with "key not found in container", rendering valid
-        // WPS files unreadable. Retry through a sanitized copy that keeps
-        // only standard relationship types. Images are still extracted from
-        // the ORIGINAL file, so nothing is lost there.
-        std::string tempPath;
-        std::string sanitizeError;
-        std::string retryNote;
-        if (zipio::createSanitizedCopy(filepath, tempPath, sanitizeError)) {
-            try {
-                workbook_.load(tempPath);
-                loaded_ = true;
-                lastError_.clear();
-                warnings_.push_back(
-                    "Loaded via sanitized copy: non-standard workbook relationship "
-                    "types / content types were stripped (xlnt error: " + firstError + ")");
-                std::remove(tempPath.c_str());
-                return true;
-            } catch (const std::exception& secondError) {
-                retryNote = std::string("sanitized copy still rejected: ") + secondError.what();
-            } catch (...) {
-                retryNote = "sanitized copy still rejected (unknown error)";
-            }
-            std::remove(tempPath.c_str());
-        } else {
-            retryNote = "sanitized copy not created: " + sanitizeError;
-        }
-
-        // AUDIT-20260917-001 is addressed by callers on Windows: pass a
-        // filesystem path encoded for the platform (see index.js and README).
-        lastError_ = std::string("FILE_OPEN_FAILED|Failed to load file: ") + firstError +
-                     " [" + retryNote + "]";
-        loaded_ = false;
-        return false;
     }
+
+    // Vendor extensions break xlnt: WPS writes proprietary relationship
+    // types (e.g. http://www.wps.cn/officeDocument/2020/cellImage) and
+    // backslash ZIP entry names, which make it abort with "key not found in
+    // container", rendering valid WPS files unreadable. Retry through a
+    // sanitized copy that normalizes entry names and keeps only standard
+    // relationship types. Images are still extracted from the ORIGINAL file,
+    // so nothing is lost there.
+    std::string tempPath;
+    std::string sanitizeError;
+    std::string retryNote;
+    if (zipio::createSanitizedCopy(filepath, tempPath, sanitizeError)) {
+        bool retryOk = false;
+        try {
+            workbook_.load(tempPath);
+            retryOk = true;
+        } catch (const std::exception& secondError) {
+            retryNote = std::string("sanitized copy still rejected: ") + secondError.what();
+        } catch (...) {
+            retryNote = "sanitized copy still rejected (unknown non-std exception)";
+        }
+        std::remove(tempPath.c_str());
+        if (retryOk) {
+            loaded_ = true;
+            lastError_.clear();
+            warnings_.push_back(
+                "Loaded via sanitized copy: normalized entry names and stripped "
+                "non-standard relationship types / content types "
+                "(xlnt error: " + firstError + ")");
+            return true;
+        }
+    } else {
+        retryNote = "sanitized copy not created: " + sanitizeError;
+    }
+
+    // AUDIT-20260917-001 is addressed by callers on Windows: pass a
+    // filesystem path encoded for the platform (see index.js and README).
+    lastError_ = std::string("FILE_OPEN_FAILED|Failed to load file: ") + firstError +
+                 " [" + retryNote + "]";
+    loaded_ = false;
+    return false;
 }
 
 std::string XlsxReader::cellToString(const xlnt::cell& cell) {
@@ -245,6 +261,8 @@ std::vector<SheetData> XlsxReader::readSheetData(size_t maxRows, size_t maxCols)
         }
     } catch (const std::exception& e) {
         lastError_ = std::string("READ_FAILED|Failed to read sheet data: ") + e.what();
+    } catch (...) {
+        lastError_ = "READ_FAILED|Failed to read sheet data (unknown non-std exception)";
     }
 
     return sheets;
@@ -410,9 +428,24 @@ ExcelData XlsxReader::readExcel(const std::string& filepath,
             }
         }
     } catch (const std::exception& e) {
-        lastError_ = std::string("READ_FAILED|Exception in readExcel: ") + e.what();
+        const std::string msg =
+            std::string("READ_FAILED|Exception while reading the workbook: ") + e.what();
+        // Fail open: never discard table data because post-processing
+        // (image attachment) threw -- report it as a warning instead
+        // (AUDIT-20260917-019).
+        if (data.sheets.empty()) {
+            lastError_ = msg;
+        } else {
+            data.warnings.push_back(msg);
+        }
     } catch (...) {
-        lastError_ = "READ_FAILED|Unknown exception in readExcel";
+        const std::string msg =
+            "READ_FAILED|Unknown non-std exception while reading the workbook";
+        if (data.sheets.empty()) {
+            lastError_ = msg;
+        } else {
+            data.warnings.push_back(msg);
+        }
     }
 
     return data;
