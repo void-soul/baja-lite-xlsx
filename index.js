@@ -175,6 +175,8 @@ function validateOptions(options) {
     inputEncoding,
     maxRows = 0,
     maxCols = 0,
+    includeImages = true,
+    columns = [],
     includeWarnings = false
   } = options;
 
@@ -204,6 +206,17 @@ function validateOptions(options) {
   if (typeof includeWarnings !== 'boolean') {
     throw makeError('INVALID_OPTIONS', 'options.includeWarnings must be a boolean');
   }
+  if (typeof includeImages !== 'boolean') {
+    throw makeError('INVALID_OPTIONS', 'options.includeImages must be a boolean');
+  }
+  if (!Array.isArray(columns)) {
+    throw makeError('INVALID_OPTIONS', 'options.columns must be an array of column names or references');
+  }
+  for (const column of columns) {
+    if (typeof column !== 'string' || column.trim() === '') {
+      throw makeError('INVALID_OPTIONS', 'options.columns must contain non-empty strings');
+    }
+  }
 
   return {
     sheetName: sheetName === undefined ? null : sheetName,
@@ -212,6 +225,8 @@ function validateOptions(options) {
     headerMap,
     maxRows,
     maxCols,
+    includeImages,
+    columns,
     includeWarnings
   };
 }
@@ -245,8 +260,11 @@ function transformToRows(nativeResult, opts) {
     );
   }
 
-  const headers = sheetData[headerRow];
-  const mappedHeaders = headers.map((header) => headerMap[header] || header);
+  // With column projection the native layer reports the resolved header
+  // texts; otherwise the header row itself provides them.
+  const headerSource =
+    (targetSheet.headers && targetSheet.headers.length) ? targetSheet.headers : sheetData[headerRow];
+  const mappedHeaders = headerSource.map((header) => headerMap[header] || header);
   const skipRowsSet = new Set([headerRow, ...skipRows]);
 
   const rows = [];
@@ -271,8 +289,18 @@ function transformToRows(nativeResult, opts) {
   return rows;
 }
 
+// Only the requested sheet, columns and (optionally) images are ever touched
+// on the native side; everything the caller does not ask for is skipped there
+// instead of being filtered afterwards.
 function runNative(filepath, opts) {
-  return addon.readExcel(filepath, opts.maxRows, opts.maxCols);
+  return addon.readExcel(filepath, {
+    sheetName: opts.sheetName === null ? undefined : opts.sheetName,
+    headerRow: opts.headerRow,
+    maxRows: opts.maxRows,
+    maxCols: opts.maxCols,
+    includeImages: opts.includeImages,
+    columns: opts.columns.length ? opts.columns : undefined
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -292,8 +320,15 @@ function runNative(filepath, opts) {
  * @param {string} [options.inputEncoding] - Force input interpretation: 'base64'.
  * @param {number} [options.maxRows=0] - Cap on rows read per sheet (0 = no cap).
  * @param {number} [options.maxCols=0] - Cap on columns read per sheet (0 = no cap).
+ * @param {boolean} [options.includeImages=true] - false skips the whole image
+ *   pipeline (no second pass over the archive, no media decompression).
+ * @param {string[]} [options.columns=[]] - Read only these columns, given as
+ *   header texts ("Amount") or Excel references ("B", "C:E").
  * @param {boolean} [options.includeWarnings=false] - Return { rows, warnings }.
- * @returns {Array<Object>|{rows: Array<Object>, warnings: string[]}}
+ * @returns {Array<Object>} One object per data row, keyed by the header texts
+ *   (after headerMap). Cell values are strings, except cells holding pictures,
+ *   which contain { data: Buffer, name, type } (or an array of them).
+ *   With includeWarnings: true it returns { rows, warnings } instead.
  */
 function readTableAsJSON(input, options = {}) {
   if (input === null || input === undefined || input === '') {

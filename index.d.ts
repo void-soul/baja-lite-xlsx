@@ -55,6 +55,19 @@ declare module 'baja-lite-xlsx' {
      * extension workarounds, etc.
      */
     includeWarnings?: boolean;
+
+    /**
+     * When false the image pipeline is skipped entirely: no second pass over
+     * the archive and no media decompression. Default: true.
+     */
+    includeImages?: boolean;
+
+    /**
+     * Read only these columns, given as header texts ("Amount") or Excel
+     * references ("B", "C:E"). Resolved inside the native layer, so
+     * unrequested columns are never read. An empty array means all columns.
+     */
+    columns?: string[];
   }
 
   /** A single output row: plain string values or image objects. */

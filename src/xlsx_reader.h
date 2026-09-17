@@ -39,6 +39,12 @@ struct CellValue {
 struct SheetData {
     std::string name;
     std::vector<std::vector<CellValue>> data;
+    // Populated only when column projection is active: the resolved header
+    // texts, aligned with the projected columns (empty text for unnamed ones).
+    std::vector<std::string> headers;
+    // 1-based source column of every projected column; empty when projection
+    // is off. Needed to map drawing anchors back onto projected positions.
+    std::vector<size_t> projectedColumns;
 };
 
 struct ExcelData {
@@ -50,24 +56,37 @@ struct ExcelData {
     std::vector<std::string> warnings;
 };
 
+// Everything that steers a read. Keeping it in C++ means work the caller does
+// not ask for is never performed: only the requested sheet is materialized,
+// only the requested columns are read, and the image pipeline can be skipped
+// entirely.
+struct ReadOptions {
+    std::string sheetName;            // empty -> first sheet
+    size_t headerRow = 0;             // 0-based; used by column projection
+    size_t maxRows = 0;               // 0 = no cap beyond the format maximum
+    size_t maxCols = 0;
+    bool includeImages = true;        // false -> skip the whole image pipeline
+    std::vector<std::string> columns; // empty -> every column
+};
+
 class XlsxReader {
 public:
     XlsxReader();
 
-    // Reads complete Excel data (sheets + images + attachments).
-    // maxRows / maxCols: optional caps on rows/columns read per sheet
-    // (0 = no explicit cap beyond the Excel format maximum).
-    // Failures are reported via lastError_ as "CODE|message".
-    ExcelData readExcel(const std::string& filepath,
-                        size_t maxRows = 0,
-                        size_t maxCols = 0);
+    // Reads the requested worksheet plus its images. Failures are reported via
+    // lastError_ as "CODE|message".
+    ExcelData readExcel(const std::string& filepath, const ReadOptions& options);
 
     // Last error in "CODE|message" form; empty when no error occurred.
     std::string getLastError() const { return lastError_; }
 
 private:
     bool load(const std::string& filepath);
-    std::vector<SheetData> readSheetData(size_t maxRows, size_t maxCols);
+    void readSheet(xlnt::worksheet ws, const ReadOptions& options, ExcelData& data);
+    // Maps options.columns onto 1-based column indices and fills
+    // sheet.headers. Returns an empty vector when projection is off.
+    std::vector<size_t> resolveColumns(xlnt::worksheet ws, const ReadOptions& options,
+                                       SheetData& sheet);
     std::string cellToString(const xlnt::cell& cell);
 
     xlnt::workbook workbook_;

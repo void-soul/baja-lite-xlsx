@@ -10,6 +10,11 @@ namespace baja_xlsx { namespace zipio {
 // Opens an archive read-only. Returns nullptr on failure and fills `error`.
 zip_t* openReadOnly(const std::string& path, std::string& error);
 
+// True when the archive contains any drawing / media / WPS cell-image part.
+// Only the central directory is scanned -- nothing is decompressed -- so this
+// is cheap enough to gate the whole image pipeline on (P0-3).
+bool packageHasMedia(const std::string& path);
+
 // Reads one entry by exact name. Validates the declared entry size
 // (AUDIT-20260917-006: no unbounded resize on attacker-controlled sizes)
 // and enforces `maxBytes`. Returns false and fills `error` on failure;

@@ -23,8 +23,10 @@ Thumbs.db
 # Test outputs
 test/output/
 
-# Local-only working documents (audit reports, scratch notes)
-docs/
+# Local-only working documents (audit reports, scratch notes).
+# Design docs under docs/plans are part of the repository.
+docs/*
+!docs/plans/
 qa.db
 
 

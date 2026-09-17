@@ -44,6 +44,8 @@ const { readTableAsJSON, readTableAsJSONAsync } = require('baja-lite-xlsx');
 const fs = require('fs');
 
 // From a file path
+// => [ { fullName: 'Ada',  age: '36' },
+//      { fullName: 'Alan', age: '41' } ]
 const rows = readTableAsJSON('data.xlsx', {
   sheetName: 'Sheet1',                                  // default: first sheet
   headerRow: 0,                                         // header row (0-based)
@@ -51,17 +53,27 @@ const rows = readTableAsJSON('data.xlsx', {
   headerMap: { 'name': 'fullName', 'age': 'age' }       // rename headers
 });
 
-// From a Buffer
+// From a Buffer -- identical result shape
 const rows2 = readTableAsJSON(fs.readFileSync('data.xlsx'));
 
 // From base64 (pass the option explicitly; the heuristic requires ZIP magic)
 const rows3 = readTableAsJSON(base64String, { inputEncoding: 'base64' });
 
-// Non-fatal diagnostics (unattached images, truncated sheets, ...)
+// Non-fatal diagnostics
+// => { rows: [ { ... } ], warnings: [ "Sheet 'Sheet1' truncated to 100000 of 500000 rows (maxRows)" ] }
 const { rows: rows4, warnings } = readTableAsJSON('data.xlsx', { includeWarnings: true });
 
-// Async: parsing runs off the event loop
+// Only the columns you need: header text or Excel reference ("B", "C:E").
+// Unrequested columns are never read, so this is also the fast path.
+// => [ { Amount: '1200' }, { Amount: '980' } ]
+const amounts = readTableAsJSON('big.xlsx', { columns: ['Amount'] });
+
+// Async: parsing runs off the event loop, same return shape
 const rows5 = await readTableAsJSONAsync('big.xlsx', { maxRows: 100000 });
+
+// Skip the image pipeline entirely when you only need values:
+// no second pass over the archive, no media decompression.
+const rows6 = await readTableAsJSONAsync('big.xlsx', { includeImages: false });
 ```
 
 ## API
@@ -80,12 +92,34 @@ Synchronous. Blocks the calling thread while parsing — prefer
 | `inputEncoding` | `'base64'` | – | Force base64 interpretation of string input |
 | `maxRows` | `number` | `0` | Cap on rows read per sheet (0 = no cap); excess rows are truncated and reported via `warnings` |
 | `maxCols` | `number` | `0` | Cap on columns read per sheet (0 = no cap) |
+| `columns` | `string[]` | `[]` | Read only these columns: header texts (`"Amount"`) or Excel references (`"B"`, `"C:E"`); empty = all columns |
+| `includeImages` | `boolean` | `true` | `false` skips the whole image pipeline (no second archive pass, no media decompression) |
 | `includeWarnings` | `boolean` | `false` | Return `{ rows, warnings }` instead of the rows array |
 
-Returns `Array<Record<string, string | ImageDataObject | ImageDataObject[]>>`.
+**Returns** `Array<Object>` — one plain object per data row, keyed by the
+header texts after `headerMap` is applied. Every value is a string; a cell
+holding a picture contains an `ImageDataObject` instead:
 
-An image cell contains `{ data: Buffer, name: string, type: string }` — or an
-array of such objects when several images attach to one cell.
+```javascript
+// data.xlsx: | name | age | photo |
+[
+  { name: 'Ada', age: '36', photo: { data: <Buffer ...>, name: 'image1.png', type: 'image/png' } },
+  { name: 'Alan', age: '41', photo: { data: <Buffer ...>, name: 'image2.png', type: 'image/png' } }
+]
+```
+
+With `includeWarnings: true` the return value changes shape:
+
+```javascript
+{
+  rows: [ { name: 'Ada', age: '36' } ],
+  warnings: [ "Sheet 'Sheet1' truncated to 2 of 900 rows (maxRows)" ]
+}
+```
+
+When several images attach to one cell the value is an array of
+`ImageDataObject`. Cells outside the requested `columns` are not returned at
+all.
 
 ### readTableAsJSONAsync(input, options?)
 
@@ -124,6 +158,28 @@ Every thrown error carries a machine-readable `code`:
   entries are capped at 128 MB (protection against zip bombs).
 - `maxRows` / `maxCols` limit how much of a sheet is materialized.
 - Truncation is always reported as a warning, never silently applied.
+
+## Performance
+
+The reader only does work you asked for:
+
+- **Single-sheet reads.** `sheetName` is resolved natively, so no other
+  worksheet is ever materialized.
+- **No empty-cell materialization.** Cells are probed before being touched, so
+  sparse sheets no longer allocate a cell per empty coordinate.
+- **Images on demand.** Workbooks without `xl/media`, `xl/drawings` or
+  `xl/cellimages` parts skip the image pipeline entirely; `includeImages: false`
+  skips it unconditionally.
+- **Column projection.** `columns` narrows the read before any cell value is
+  produced.
+
+Practical guidance for large files:
+
+1. Pass `columns` when you only need a few of many columns.
+2. Pass `includeImages: false` when you only need values.
+3. Use `maxRows` / `maxCols` to bound a probe read.
+4. Use `readTableAsJSONAsync` in servers and Electron; several reads then run
+   in parallel on the libuv thread pool (`UV_THREADPOOL_SIZE` controls it).
 
 ## Building from source
 

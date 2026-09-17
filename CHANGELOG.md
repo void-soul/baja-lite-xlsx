@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.17 (2026-09-17) — performance
+
+Zero API change:
+
+- Only the requested worksheet is materialized (`sheetName` is resolved in the
+  native layer); other sheets are no longer read at all.
+- Cells are probed with `worksheet::has_cell()` before being touched, so empty
+  coordinates no longer allocate (and retain) an empty cell.
+- Workbooks without `xl/media`, `xl/drawings` or `xl/cellimages` parts skip the
+  whole image pipeline — no second pass over the archive.
+- Sheet data is converted to JS row by row and released as it goes, so the C++
+  copy no longer coexists with the full JS result.
+- Integral numbers skip the `snprintf("%g")` round-trip probing.
+
+New options (additive, existing behaviour unchanged):
+
+- `columns`: read only the listed columns, given as header texts or Excel
+  references (`"B"`, `"C:E"`). Resolved natively, so unrequested columns are
+  never read.
+- `includeImages: false`: skip the image pipeline unconditionally.
+
+Docs: examples now show the exact return shape (rows, image cells, and the
+`{ rows, warnings }` variant).
+
 ## 1.0.16 (2026-09-17) — audit remediation
 
 Security & robustness:

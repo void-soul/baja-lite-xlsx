@@ -165,6 +165,57 @@ test('headerMap renames columns', 'sample', (fixture) => {
 });
 
 // ---------------------------------------------------------------------------
+// Column projection (P1-2) and image opt-out (P0-3)
+// ---------------------------------------------------------------------------
+
+test('columns projection keeps only the requested column', 'sample', (fixture) => {
+  const all = readTableAsJSON(fixture);
+  const keys = Object.keys(all[0] || {});
+  if (keys.length === 0) return; // no headers to project on
+  const projected = readTableAsJSON(fixture, { columns: [keys[0]] });
+  assert.equal(projected.length, all.length, 'row count must not change');
+  for (const row of projected) {
+    assert.ok(Object.keys(row).length <= 1, 'only one column expected');
+    assert.ok(keys[0] in row, `expected key "${keys[0]}"`);
+  }
+});
+
+test('columns projection accepts Excel references', 'sample', (fixture) => {
+  const projected = readTableAsJSON(fixture, { columns: ['A'] });
+  assert.ok(Array.isArray(projected));
+  for (const row of projected) {
+    assert.ok(Object.keys(row).length <= 1);
+  }
+});
+
+test('unknown column -> INVALID_OPTIONS', 'sample', (fixture) => {
+  assert.throws(
+    () => readTableAsJSON(fixture, { columns: ['__NO_SUCH_COLUMN__'] }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+test('bad columns type -> INVALID_OPTIONS', 'sample', (fixture) => {
+  assert.throws(
+    () => readTableAsJSON(fixture, { columns: 'A' }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+test('includeImages false still returns every row', 'sample', (fixture) => {
+  const withoutImages = readTableAsJSON(fixture, { includeImages: false });
+  const withImages = readTableAsJSON(fixture);
+  assert.equal(withoutImages.length, withImages.length);
+});
+
+test('bad includeImages -> INVALID_OPTIONS', 'sample', (fixture) => {
+  assert.throws(
+    () => readTableAsJSON(fixture, { includeImages: 'no' }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Buffer / base64 input
 // ---------------------------------------------------------------------------
 

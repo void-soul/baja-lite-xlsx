@@ -2,10 +2,12 @@
 #include "image_extractor.h"
 #include "zip_reader.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -28,6 +30,14 @@ std::string formatDouble(double v) {
         return std::string();
     }
     char buf[64];
+
+    // Fast path (P1-3): integral values are the common case in spreadsheets
+    // and need no round-trip precision probing.
+    if (v == std::floor(v) && std::fabs(v) < 1e15) {
+        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+        return std::string(buf);
+    }
+
     for (int precision = 15; precision <= 17; ++precision) {
         std::snprintf(buf, sizeof(buf), "%.*g", precision, v);
         if (std::strtod(buf, nullptr) == v) {
@@ -81,6 +91,54 @@ std::string formatDateSerial(double serial) {
 
 inline std::string cellKey(size_t row, size_t col) {
     return std::to_string(row) + "\x1F" + std::to_string(col);
+}
+
+void trimInPlace(std::string& text) {
+    const char* kSpace = " \t\r\n";
+    const size_t first = text.find_first_not_of(kSpace);
+    if (first == std::string::npos) {
+        text.clear();
+        return;
+    }
+    const size_t last = text.find_last_not_of(kSpace);
+    text = text.substr(first, last - first + 1);
+}
+
+// "A" -> 1, "AB" -> 28, ... Returns false for anything that is not 1-3 letters.
+bool parseColumnLetters(const std::string& text, size_t& out) {
+    if (text.empty() || text.size() > 3) return false;
+    size_t value = 0;
+    for (char c : text) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        const char upper = static_cast<char>(std::toupper(uc));
+        if (upper < 'A' || upper > 'Z') return false;
+        value = value * 26 + static_cast<size_t>(upper - 'A' + 1);
+    }
+    out = value;
+    return value > 0;
+}
+
+// Accepts "A", "AB" and "C:E" style references.
+bool parseColumnReference(const std::string& text, size_t& first, size_t& last) {
+    const size_t colon = text.find(':');
+    if (colon == std::string::npos) {
+        if (!parseColumnLetters(text, first)) return false;
+        last = first;
+        return true;
+    }
+    return parseColumnLetters(text.substr(0, colon), first) &&
+           parseColumnLetters(text.substr(colon + 1), last) &&
+           first <= last;
+}
+
+std::string columnName(size_t index) {
+    std::string name;
+    while (index > 0) {
+        const size_t rem = (index - 1) % 26;
+        name.insert(name.begin(), static_cast<char>('A' + static_cast<int>(rem)));
+        index = (index - 1) / 26;
+    }
+    return name;
 }
 
 } // namespace
@@ -198,78 +256,153 @@ std::string XlsxReader::cellToString(const xlnt::cell& cell) {
     }
 }
 
-std::vector<SheetData> XlsxReader::readSheetData(size_t maxRows, size_t maxCols) {
-    std::vector<SheetData> sheets;
-
-    if (!loaded_) {
-        lastError_ = "NO_FILE_LOADED|No file loaded";
-        return sheets;
+std::vector<size_t> XlsxReader::resolveColumns(xlnt::worksheet ws,
+                                               const ReadOptions& options,
+                                               SheetData& sheet) {
+    std::vector<size_t> selected;
+    if (options.columns.empty()) {
+        return selected; // projection off: read every column
     }
 
-    try {
-        for (auto ws : workbook_) {
-            SheetData sheetData;
-            sheetData.name = ws.title();
+    const size_t maxCol = static_cast<size_t>(ws.highest_column().index);
+    const xlnt::row_t headerIndex = static_cast<xlnt::row_t>(options.headerRow + 1);
 
-            if (!ws.has_cell(xlnt::cell_reference("A1"))) {
-                sheets.push_back(sheetData);
+    // Header texts are only read once and only for the header row; every other
+    // row then touches the requested columns exclusively.
+    std::vector<std::string> headers(maxCol + 1);
+    std::map<std::string, size_t> byHeader;
+    for (size_t col = 1; col <= maxCol; ++col) {
+        std::string text;
+        xlnt::cell_reference ref(xlnt::column_t::index_t(col), headerIndex);
+        if (ws.has_cell(ref)) {
+            try {
+                text = cellToString(ws.cell(ref));
+            } catch (...) {
+                text.clear();
+            }
+        }
+        trimInPlace(text);
+        headers[col] = text;
+        if (!text.empty()) {
+            byHeader.emplace(text, col);
+        }
+    }
+
+    std::vector<size_t> ordered;
+    for (const std::string& raw : options.columns) {
+        std::string item = raw;
+        trimInPlace(item);
+        if (item.empty()) continue;
+
+        auto headerIt = byHeader.find(item);
+        if (headerIt != byHeader.end()) {
+            ordered.push_back(headerIt->second);
+            continue;
+        }
+
+        size_t first = 0;
+        size_t last = 0;
+        if (parseColumnReference(item, first, last)) {
+            if (first > maxCol) {
+                warnings_.push_back("Column '" + raw + "' lies outside the sheet (last column is " +
+                                    columnName(maxCol) + "); skipped");
                 continue;
             }
-
-            auto maxRow = ws.highest_row();
-            auto maxCol = ws.highest_column();
-
-            // Optional read caps (AUDIT-20260917-010); truncation is
-            // reported as a warning, never silent.
-            const size_t rowCap = (maxRows > 0 && maxRows < static_cast<size_t>(maxRow))
-                                      ? maxRows : static_cast<size_t>(maxRow);
-            const size_t colCap = (maxCols > 0 && maxCols < static_cast<size_t>(maxCol.index))
-                                      ? maxCols : static_cast<size_t>(maxCol.index);
-            if (rowCap < static_cast<size_t>(maxRow)) {
-                std::ostringstream oss;
-                oss << "Sheet '" << sheetData.name << "' truncated to " << rowCap
-                    << " of " << maxRow << " rows (maxRows)";
-                warnings_.push_back(oss.str());
+            for (size_t col = first; col <= std::min(last, maxCol); ++col) {
+                ordered.push_back(col);
             }
-            if (colCap < static_cast<size_t>(maxCol.index)) {
-                std::ostringstream oss;
-                oss << "Sheet '" << sheetData.name << "' truncated to " << colCap
-                    << " of " << maxCol.index << " columns (maxCols)";
-                warnings_.push_back(oss.str());
-            }
-
-            for (size_t row = 1; row <= rowCap; ++row) {
-                std::vector<CellValue> rowData;
-                rowData.reserve(static_cast<size_t>(colCap));
-                for (size_t col = 1; col <= colCap; ++col) {
-                    try {
-                        auto cell = ws.cell(xlnt::column_t::index_t(col),
-                                            static_cast<xlnt::row_t>(row));
-                        CellValue value;
-                        value.text = cellToString(cell);
-                        rowData.push_back(std::move(value));
-                    } catch (...) {
-                        CellValue value;
-                        value.text = "";
-                        rowData.push_back(std::move(value));
-                    }
-                }
-                sheetData.data.push_back(std::move(rowData));
-            }
-
-            sheets.push_back(std::move(sheetData));
+            continue;
         }
-    } catch (const std::exception& e) {
-        lastError_ = std::string("READ_FAILED|Failed to read sheet data: ") + e.what();
-    } catch (...) {
-        lastError_ = "READ_FAILED|Failed to read sheet data (unknown non-std exception)";
+
+        warnings_.push_back("Column '" + raw + "' matches no header text and is not a valid "
+                            "column reference; skipped");
     }
 
-    return sheets;
+    std::set<size_t> seen;
+    for (size_t col : ordered) {
+        if (col >= 1 && col <= maxCol && seen.insert(col).second) {
+            selected.push_back(col);
+        }
+    }
+
+    if (selected.empty()) {
+        lastError_ = "INVALID_OPTIONS|None of the requested columns were found in the sheet";
+        return selected;
+    }
+
+    for (size_t col : selected) {
+        sheet.headers.push_back(headers[col]);
+    }
+    sheet.projectedColumns = selected;
+    return selected;
+}
+
+void XlsxReader::readSheet(xlnt::worksheet ws, const ReadOptions& options, ExcelData& data) {
+    SheetData sheet;
+    sheet.name = ws.title();
+
+    if (!ws.has_cell(xlnt::cell_reference("A1"))) {
+        data.sheets.push_back(std::move(sheet));
+        return;
+    }
+
+    const size_t maxRow = static_cast<size_t>(ws.highest_row());
+    const size_t maxCol = static_cast<size_t>(ws.highest_column().index);
+
+    // Optional read caps (AUDIT-20260917-010); truncation is
+    // reported as a warning, never silent.
+    const size_t rowCap = (options.maxRows > 0 && options.maxRows < maxRow)
+                              ? options.maxRows : maxRow;
+    const size_t colCap = (options.maxCols > 0 && options.maxCols < maxCol)
+                              ? options.maxCols : maxCol;
+    if (rowCap < maxRow) {
+        std::ostringstream oss;
+        oss << "Sheet '" << sheet.name << "' truncated to " << rowCap
+            << " of " << maxRow << " rows (maxRows)";
+        warnings_.push_back(oss.str());
+    }
+    if (colCap < maxCol) {
+        std::ostringstream oss;
+        oss << "Sheet '" << sheet.name << "' truncated to " << colCap
+            << " of " << maxCol << " columns (maxCols)";
+        warnings_.push_back(oss.str());
+    }
+
+    const std::vector<size_t> projected = resolveColumns(ws, options, sheet);
+    const bool useProjection = !projected.empty();
+    const size_t colCount = useProjection ? projected.size() : colCap;
+
+    for (size_t row = 1; row <= rowCap; ++row) {
+        std::vector<CellValue> rowData;
+        rowData.reserve(colCount);
+        const xlnt::row_t xlRow = static_cast<xlnt::row_t>(row);
+
+        for (size_t i = 0; i < colCount; ++i) {
+            const size_t col = useProjection ? projected[i] : (i + 1);
+            CellValue value;
+
+            // P0-2: probe before touching. worksheet::cell() creates -- and
+            // keeps -- an empty cell for every coordinate that does not exist
+            // yet, which is the dominant cost on sparse sheets and inflates
+            // memory with cells that hold nothing.
+            xlnt::cell_reference ref(xlnt::column_t::index_t(col), xlRow);
+            if (ws.has_cell(ref)) {
+                try {
+                    value.text = cellToString(ws.cell(ref));
+                } catch (...) {
+                    value.text.clear();
+                }
+            }
+            rowData.push_back(std::move(value));
+        }
+        sheet.data.push_back(std::move(rowData));
+    }
+
+    data.sheets.push_back(std::move(sheet));
 }
 
 ExcelData XlsxReader::readExcel(const std::string& filepath,
-                                size_t maxRows, size_t maxCols) {
+                                const ReadOptions& options) {
     ExcelData data;
 
     try {
@@ -277,7 +410,33 @@ ExcelData XlsxReader::readExcel(const std::string& filepath,
             return data;
         }
 
-        data.sheets = readSheetData(maxRows, maxCols);
+        // P0-1: only the worksheet the caller asked for is materialized.
+        xlnt::worksheet ws;
+        if (options.sheetName.empty()) {
+            if (workbook_.sheet_count() == 0) {
+                lastError_ = "NO_SHEETS|Excel file has no sheets";
+                return data;
+            }
+            ws = workbook_.sheet_by_index(0);
+        } else if (workbook_.contains(options.sheetName)) {
+            ws = workbook_.sheet_by_title(options.sheetName);
+        } else {
+            lastError_ = "SHEET_NOT_FOUND|Sheet \"" + options.sheetName + "\" not found";
+            return data;
+        }
+
+        readSheet(ws, options, data);
+        data.warnings = warnings_; // cell-level diagnostics (truncation, ...)
+        if (!lastError_.empty()) {
+            return data;
+        }
+
+        // P0-3: the image pipeline costs a second full pass over the archive.
+        // Workbooks without media parts skip it entirely, and callers can
+        // always opt out explicitly with includeImages: false.
+        if (!options.includeImages || !zipio::packageHasMedia(filepath)) {
+            return data;
+        }
 
         ImageExtractor extractor;
         std::vector<ImageInfo> imageInfos;
@@ -397,7 +556,12 @@ ExcelData XlsxReader::readExcel(const std::string& filepath,
                     // 2) Anchor-based images (exact-name lookup only;
                     // the previous substring fuzzy match that could attach
                     // the wrong image is gone -- AUDIT-20260917-014).
-                    const std::string key = cellKey(r, c);
+                    // With column projection `c` is a projected position, so
+                    // translate it back to the source column index.
+                    const size_t sourceCol = sheet.projectedColumns.empty()
+                                                 ? c
+                                                 : (sheet.projectedColumns[c] - 1);
+                    const std::string key = cellKey(r, sourceCol);
                     auto anchorIt = anchorByCell.find(sheet.name + "\x1F" + key);
                     if (anchorIt == anchorByCell.end()) {
                         continue;

@@ -89,14 +89,25 @@ Value cellToJsValue(Env env, const CellValue& cell,
     return imgArray;
 }
 
-Array sheetsToArray(Env env, const ExcelData& data,
+Array stringArray(Env env, const std::vector<std::string>& values) {
+    Array result = Array::New(env, values.size());
+    for (size_t i = 0; i < values.size(); ++i) {
+        result.Set(static_cast<uint32_t>(i), String::New(env, values[i]));
+    }
+    return result;
+}
+
+// Takes a non-const ExcelData so each row can be moved out while it is
+// converted: the C++ copy is released row by row instead of staying fully
+// resident next to the JS result (P0-5).
+Array sheetsToArray(Env env, ExcelData& data,
                     std::map<int, Value>& bufferCache) {
     Array result = Array::New(env, data.sheets.size());
 
     for (size_t i = 0; i < data.sheets.size(); ++i) {
         if (hasPendingException(env)) return result;
 
-        const SheetData& sheet = data.sheets[i];
+        SheetData& sheet = data.sheets[i];
         Object sheetObj = Object::New(env);
         sheetObj.Set("name", String::New(env, sheet.name));
 
@@ -104,7 +115,7 @@ Array sheetsToArray(Env env, const ExcelData& data,
         for (size_t row = 0; row < sheet.data.size(); ++row) {
             if (hasPendingException(env)) return result;
 
-            const std::vector<CellValue>& rowData = sheet.data[row];
+            std::vector<CellValue> rowData = std::move(sheet.data[row]);
             Array rowArray = Array::New(env, rowData.size());
             for (size_t col = 0; col < rowData.size(); ++col) {
                 rowArray.Set(static_cast<uint32_t>(col),
@@ -113,10 +124,16 @@ Array sheetsToArray(Env env, const ExcelData& data,
             dataArray.Set(static_cast<uint32_t>(row), rowArray);
         }
 
+        // Present only for column projection: the resolved header texts in the
+        // same order as the projected columns.
+        if (!sheet.headers.empty()) {
+            sheetObj.Set("headers", stringArray(env, sheet.headers));
+        }
         sheetObj.Set("data", dataArray);
         result.Set(static_cast<uint32_t>(i), sheetObj);
     }
 
+    data.sheets.clear();
     return result;
 }
 
@@ -164,7 +181,7 @@ Array warningsToArray(Env env, const std::vector<std::string>& warnings) {
     return result;
 }
 
-Object buildResult(Env env, const ExcelData& data) {
+Object buildResult(Env env, ExcelData& data) {
     std::map<int, Value> bufferCache;
     Object result = Object::New(env);
     result.Set("sheets", sheetsToArray(env, data, bufferCache));
@@ -174,24 +191,93 @@ Object buildResult(Env env, const ExcelData& data) {
     return result;
 }
 
-// Reads optional numeric arguments (maxRows, maxCols).
-bool readCapArgument(const CallbackInfo& info, size_t index, size_t& out) {
+// Reads one optional non-negative integer option; missing/null keeps default.
+bool readNumberOption(Env env, const Object& opts, const char* name, size_t& out) {
     out = 0;
-    if (info.Length() <= index || info[index].IsUndefined() || info[index].IsNull()) {
-        return true;
-    }
-    if (!info[index].IsNumber()) {
-        TypeError::New(info.Env(), "maxRows/maxCols must be numbers")
+    if (!opts.Has(name)) return true;
+    Value v = opts.Get(name);
+    if (v.IsUndefined() || v.IsNull()) return true;
+    if (!v.IsNumber()) {
+        TypeError::New(env, std::string("options.") + name + " must be a number")
             .ThrowAsJavaScriptException();
         return false;
     }
-    const double v = info[index].As<Number>().DoubleValue();
-    if (!(v >= 0) || v != std::floor(v)) {
-        TypeError::New(info.Env(), "maxRows/maxCols must be non-negative integers")
+    const double value = v.As<Number>().DoubleValue();
+    if (!(value >= 0) || value != std::floor(value)) {
+        TypeError::New(env, std::string("options.") + name + " must be a non-negative integer")
             .ThrowAsJavaScriptException();
         return false;
     }
-    out = static_cast<size_t>(v);
+    out = static_cast<size_t>(value);
+    return true;
+}
+
+// Reads the options object: { sheetName, headerRow, maxRows, maxCols,
+// includeImages, columns }. Everything is optional, so a caller that only
+// needs one option still writes `{ sheetName: 'Sheet2' }`.
+bool parseReadOptions(const CallbackInfo& info, size_t index, ReadOptions& out) {
+    Env env = info.Env();
+    if (info.Length() <= index || !info[index].IsObject()) {
+        return true; // no options at all -> defaults
+    }
+
+    Object opts = info[index].As<Object>();
+
+    if (opts.Has("sheetName")) {
+        Value v = opts.Get("sheetName");
+        if (!v.IsUndefined() && !v.IsNull()) {
+            if (!v.IsString()) {
+                TypeError::New(env, "options.sheetName must be a string")
+                    .ThrowAsJavaScriptException();
+                return false;
+            }
+            out.sheetName = v.As<String>().Utf8Value();
+        }
+    }
+
+    size_t numeric = 0;
+    if (!readNumberOption(env, opts, "headerRow", numeric)) return false;
+    out.headerRow = numeric;
+    if (!readNumberOption(env, opts, "maxRows", numeric)) return false;
+    out.maxRows = numeric;
+    if (!readNumberOption(env, opts, "maxCols", numeric)) return false;
+    out.maxCols = numeric;
+
+    if (opts.Has("includeImages")) {
+        Value v = opts.Get("includeImages");
+        if (!v.IsUndefined() && !v.IsNull()) {
+            if (!v.IsBoolean()) {
+                TypeError::New(env, "options.includeImages must be a boolean")
+                    .ThrowAsJavaScriptException();
+                return false;
+            }
+            out.includeImages = v.As<Boolean>().Value();
+        }
+    }
+
+    if (opts.Has("columns")) {
+        Value v = opts.Get("columns");
+        if (!v.IsUndefined() && !v.IsNull()) {
+            if (!v.IsArray()) {
+                TypeError::New(env, "options.columns must be an array of strings")
+                    .ThrowAsJavaScriptException();
+                return false;
+            }
+            Array arr = v.As<Array>();
+            const uint32_t length = arr.Length();
+            out.columns.reserve(length);
+            for (uint32_t i = 0; i < length; ++i) {
+                Value item = arr.Get(i);
+                if (!item.IsString()) {
+                    TypeError::New(env, "options.columns must contain only strings")
+                        .ThrowAsJavaScriptException();
+                    return false;
+                }
+                out.columns.push_back(item.As<String>().Utf8Value());
+            }
+        }
+    }
+
     return true;
 }
 
@@ -209,16 +295,15 @@ Value ReadExcel(const CallbackInfo& info) {
         return env.Null();
     }
 
-    size_t maxRows = 0;
-    size_t maxCols = 0;
-    if (!readCapArgument(info, 1, maxRows) || !readCapArgument(info, 2, maxCols)) {
+    ReadOptions options;
+    if (!parseReadOptions(info, 1, options)) {
         return env.Null();
     }
 
     std::string filepath = info[0].As<String>().Utf8Value();
 
     XlsxReader reader;
-    ExcelData data = reader.readExcel(filepath, maxRows, maxCols);
+    ExcelData data = reader.readExcel(filepath, options);
 
     if (!reader.getLastError().empty()) {
         return failWith(env, reader.getLastError());
@@ -238,18 +323,17 @@ Value ReadExcel(const CallbackInfo& info) {
 
 class ReadExcelWorker : public Napi::AsyncWorker {
 public:
-    ReadExcelWorker(Napi::Env env, std::string filepath, size_t maxRows, size_t maxCols)
+    ReadExcelWorker(Napi::Env env, std::string filepath, const ReadOptions& options)
         : Napi::AsyncWorker(env),
           deferred_(Napi::Promise::Deferred::New(env)),
           filepath_(std::move(filepath)),
-          maxRows_(maxRows),
-          maxCols_(maxCols) {}
+          options_(options) {}
 
     Napi::Promise Promise() { return deferred_.Promise(); }
 
     void Execute() override {
         XlsxReader reader;
-        data_ = reader.readExcel(filepath_, maxRows_, maxCols_);
+        data_ = reader.readExcel(filepath_, options_);
         if (!reader.getLastError().empty()) {
             SetError(reader.getLastError());
         }
@@ -275,8 +359,7 @@ public:
 private:
     Napi::Promise::Deferred deferred_;
     std::string filepath_;
-    size_t maxRows_;
-    size_t maxCols_;
+    ReadOptions options_;
     ExcelData data_;
 };
 
@@ -288,15 +371,14 @@ Value ReadExcelAsync(const CallbackInfo& info) {
         return env.Null();
     }
 
-    size_t maxRows = 0;
-    size_t maxCols = 0;
-    if (!readCapArgument(info, 1, maxRows) || !readCapArgument(info, 2, maxCols)) {
+    ReadOptions options;
+    if (!parseReadOptions(info, 1, options)) {
         return env.Null();
     }
 
     auto* worker = new ReadExcelWorker(env,
                                        info[0].As<String>().Utf8Value(),
-                                       maxRows, maxCols);
+                                       options);
     auto promise = worker->Promise();
     worker->Queue();
     return promise;

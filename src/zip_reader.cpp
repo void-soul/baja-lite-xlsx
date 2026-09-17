@@ -208,6 +208,30 @@ bool createSanitizedCopy(const std::string& source, std::string& outTempPath,
     return true;
 }
 
+bool packageHasMedia(const std::string& path) {
+    std::string error;
+    zip_t* za = openReadOnly(path, error);
+    if (!za) {
+        // Cannot tell -> assume there is nothing to extract; sheet data is
+        // still returned in full.
+        return false;
+    }
+
+    bool found = false;
+    const zip_int64_t numEntries = zip_get_num_entries(za, 0);
+    for (zip_int64_t i = 0; i < numEntries && !found; ++i) {
+        const char* entryName = zip_get_name(za, i, 0);
+        if (!entryName) continue;
+        const std::string entry(entryName);
+        found = entry.compare(0, 9, "xl/media/") == 0 ||
+                entry.compare(0, 12, "xl/drawings/") == 0 ||
+                entry.compare(0, 14, "xl/cellimages/") == 0;
+    }
+
+    close(za);
+    return found;
+}
+
 zip_t* openReadOnly(const std::string& path, std::string& error) {
     error.clear();
     int errorp = 0;

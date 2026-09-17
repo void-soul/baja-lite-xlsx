@@ -41,6 +41,8 @@ const { readTableAsJSON, readTableAsJSONAsync } = require('baja-lite-xlsx');
 const fs = require('fs');
 
 // 文件路径
+// => [ { name: '张三', 金额: '1200' },
+//      { name: '李四', 金额: '980' } ]
 const rows = readTableAsJSON('data.xlsx', {
   sheetName: 'Sheet1',           // 不传则读取第一个工作表
   headerRow: 0,                  // 表头行（从 0 开始）
@@ -48,17 +50,25 @@ const rows = readTableAsJSON('data.xlsx', {
   headerMap: { '名称': 'name' }  // 表头重命名
 });
 
-// Buffer
+// Buffer，返回结构同上
 const rows2 = readTableAsJSON(fs.readFileSync('data.xlsx'));
 
 // base64（建议显式声明；启发式判定要求解码后是 ZIP 头）
 const rows3 = readTableAsJSON(base64String, { inputEncoding: 'base64' });
 
-// 非致命诊断信息（图片未挂载、工作表被截断等）
+// 非致命诊断信息
+// => { rows: [ { ... } ], warnings: [ "Sheet 'Sheet1' truncated to 100000 of 500000 rows (maxRows)" ] }
 const { rows: rows4, warnings } = readTableAsJSON('data.xlsx', { includeWarnings: true });
 
-// 异步：解析不在事件循环上执行
+// 只读需要的列：表头文字或 Excel 列标（"B"、"C:E"），其余列根本不会被读取
+// => [ { 金额: '1200' }, { 金额: '980' } ]
+const amounts = readTableAsJSON('big.xlsx', { columns: ['金额'] });
+
+// 异步：解析不在事件循环上执行，返回结构同上
 const rows5 = await readTableAsJSONAsync('big.xlsx', { maxRows: 100000 });
+
+// 只要数值时跳过整条图片处理链路（不再二次遍历压缩包、不解压媒体）
+const rows6 = await readTableAsJSONAsync('big.xlsx', { includeImages: false });
 ```
 
 ## API
@@ -77,12 +87,32 @@ const rows5 = await readTableAsJSONAsync('big.xlsx', { maxRows: 100000 });
 | `inputEncoding` | `'base64'` | – | 强制按 base64 解析字符串输入 |
 | `maxRows` | `number` | `0` | 每个工作表读取行数上限（0 表示不限制）；超出部分截断并通过 `warnings` 上报 |
 | `maxCols` | `number` | `0` | 每个工作表读取列数上限（0 表示不限制） |
+| `columns` | `string[]` | `[]` | 只读这些列：表头文字（`"金额"`）或 Excel 列标（`"B"`、`"C:E"`）；空数组表示全部列 |
+| `includeImages` | `boolean` | `true` | 为 `false` 时跳过整条图片处理链路（不二次遍历压缩包、不解压媒体） |
 | `includeWarnings` | `boolean` | `false` | 返回 `{ rows, warnings }` 而非仅行数组 |
 
-返回 `Array<Record<string, string | ImageDataObject | ImageDataObject[]>>`。
+**返回** `Array<Object>`：每个数据行一个普通对象，键为应用 `headerMap` 之后的表头
+文字，值全部为字符串；单元格内是图片时则为 `ImageDataObject`：
 
-图片单元格为 `{ data: Buffer, name: string, type: string }`；同一单元格挂载多张
-图片时返回它们的数组。
+```javascript
+// data.xlsx：| 名称 | 金额 | 照片 |
+[
+  { 名称: '张三', 金额: '1200', 照片: { data: <Buffer ...>, name: 'image1.png', type: 'image/png' } },
+  { 名称: '李四', 金额: '980', 照片: { data: <Buffer ...>, name: 'image2.png', type: 'image/png' } }
+]
+```
+
+`includeWarnings: true` 时返回结构变为：
+
+```javascript
+{
+  rows: [ { 名称: '张三', 金额: '1200' } ],
+  warnings: [ "Sheet 'Sheet1' truncated to 2 of 900 rows (maxRows)" ]
+}
+```
+
+同一单元格挂载多张图片时值为 `ImageDataObject` 数组；未包含在 `columns` 中的列不会
+出现在结果里。
 
 ### readTableAsJSONAsync(input, options?)
 
@@ -119,6 +149,24 @@ const rows5 = await readTableAsJSONAsync('big.xlsx', { maxRows: 100000 });
 - 未声明大小或超过 256 MB 的 ZIP 条目会被拒绝；媒体条目上限 128 MB（防 zip 炸弹）；
 - `maxRows` / `maxCols` 限制工作表物化规模；
 - 截断始终以 warning 上报，绝不静默发生。
+
+## 性能
+
+读取过程只做你要求的那部分工作：
+
+- **只读单个工作表**：`sheetName` 在原生层解析，其他工作表不会被物化。
+- **不为空格分配单元格**：取值前先探测，稀疏表不再为每个空坐标创建单元格。
+- **图片按需解析**：包内没有 `xl/media`、`xl/drawings`、`xl/cellimages` 时整条
+  图片链路直接跳过；`includeImages: false` 则无条件跳过。
+- **列投影**：`columns` 在产出任何单元格值之前就收窄读取范围。
+
+大文件实践建议：
+
+1. 只需要少数几列时传 `columns`；
+2. 只要数值时传 `includeImages: false`；
+3. 用 `maxRows` / `maxCols` 限制探查读取的规模；
+4. 服务端与 Electron 用 `readTableAsJSONAsync`，多次读取可在 libuv 线程池并行
+   （由 `UV_THREADPOOL_SIZE` 控制并发度）。
 
 ## 从源码编译
 
