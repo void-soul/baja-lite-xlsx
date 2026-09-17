@@ -124,7 +124,11 @@ private:
                          const std::vector<size_t>& projectedColumns,
                          size_t rowIndex, std::vector<CellValue>& row,
                          const ImageAttachment& attach);
-    void readSheet(xlnt::worksheet ws, const ReadOptions& options, ExcelData& data);
+    // When `sink` is null rows are buffered into `data`; otherwise they are
+    // pushed to the sink in batches of `batchSize` (P2-1).
+    void readSheet(xlnt::worksheet ws, const ReadOptions& options,
+                   const ImageAttachment& attach, const RowBatchSink* sink,
+                   size_t batchSize, ExcelData& data);
     // Maps options.columns onto 1-based column indices and fills
     // sheet.headers. Returns an empty vector when projection is off.
     std::vector<size_t> resolveColumns(xlnt::worksheet ws, const ReadOptions& options,

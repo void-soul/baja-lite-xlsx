@@ -681,12 +681,14 @@ void recordReadFailure(const std::string& message, bool hasSheets,
 
 // Shared pipeline: images first (so rows can be attached while they are
 // produced), then the requested worksheet -- either buffered or streamed.
-void runPipeline(XlsxReader* reader, const std::string* filepath,
-                 const std::vector<uint8_t>* bytes, const ReadOptions& options,
-                 const RowBatchSink* sink, size_t batchSize, ExcelData& data) {
+void XlsxReader::runPipeline(const std::string* filepath,
+                             const std::vector<uint8_t>* bytes,
+                             const ReadOptions& options,
+                             const RowBatchSink* sink, size_t batchSize,
+                             ExcelData& data) {
     ImageAttachment attach;
-    reader->readImages(filepath, bytes, options, data, attach);
-    reader->readRequestedSheet(options, attach, sink, batchSize, data);
+    readImages(filepath, bytes, options, data, attach);
+    readRequestedSheet(options, attach, sink, batchSize, data);
 }
 
 } // namespace
