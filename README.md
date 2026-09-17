@@ -150,13 +150,52 @@ shown above; the old `/usr/local` / brew / apt paths are no longer used.
 ## CI & releases
 
 - Push to `master` / PRs: lint + typecheck, Windows native build, `npm test`.
-- Push a tag `v*` (must match `package.json` `version`): CI additionally
-  builds the Windows prebuild archives (napi + electron, DLLs bundled),
-  runs the tests, generates `prebuilds/checksums.txt`, and publishes
-  everything to the matching GitHub Release — that is what
-  `prebuild-install` downloads during `npm install`.
+- Push a tag `v*` (must match `package.json` `version`): the release
+  workflow
+  1. builds the Windows prebuild archives (napi + electron, DLLs bundled),
+  2. runs the tests and generates `prebuilds/checksums.txt`,
+  3. publishes the archives to the matching GitHub Release — this is what
+     `prebuild-install` downloads during `npm install`,
+  4. publishes the package itself to npm (`npm publish --provenance`).
 - Linux/macOS prebuilds are not produced yet; users on those platforms
   build from source (see above).
+
+### Releasing a new version
+
+```bash
+# 1. bump the version (must equal the future tag, minus the leading "v")
+npm version patch --no-git-tag-version     # or minor / major
+# 2. update CHANGELOG.md, commit, push
+git commit -am "chore: release v1.0.17"
+git push origin master
+# 3. tag -> triggers build, GitHub Release and npm publish
+git tag -a v1.0.17 -m "v1.0.17" && git push origin v1.0.17
+```
+
+### npm publishing setup (one-time)
+
+The workflow uses npm **Trusted Publishing** (OIDC), so no `NPM_TOKEN`
+secret is stored in the repository:
+
+1. Open https://www.npmjs.com/package/baja-lite-xlsx → *Settings* →
+   *Trusted Publisher* → *GitHub Actions*.
+2. Fill in: Organization/user `void-soul`, Repository `baja-lite-xlsx`,
+   Workflow filename `prebuild.yml`, Environment (leave empty).
+3. Save. The next `v*` tag push can publish without any token.
+
+Prefer a token instead? Add a repository secret `NPM_TOKEN` (npm *Access
+Token* with publish rights) and replace the publish step with:
+
+```yaml
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+The published tarball is limited to `index.js`, `index.d.ts`, `src/`,
+`scripts/`, `binding.gyp` and the docs (see `package.json` `files`): binaries
+are never bundled into the npm package — they are downloaded from the GitHub
+Release, keeping the tarball small and always matching the release assets.
 
 ## Troubleshooting (Windows)
 

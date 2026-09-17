@@ -47,6 +47,12 @@ API:
 
 Engineering:
 
+- npm publishing automated in the release workflow via npm Trusted
+  Publishing (OIDC, no stored token); runs only after the GitHub Release
+  assets exist and skips versions already on the registry.
+- `package.json` `files` whitelist added so the npm tarball ships only the
+  JS binding, C++ sources, build scripts and docs (no stale prebuild
+  archives or example workbooks).
 - Examples rewritten against the real API (previously crashed on import).
 - README rewritten to match the actual API.
 - `npm test` now runs a real regression suite (`test/test.js`).

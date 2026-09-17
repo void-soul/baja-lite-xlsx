@@ -4,6 +4,16 @@
   "description": "A native Node.js module for reading Excel files and extracting images using xlnt library",
   "main": "index.js",
   "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "src/",
+    "scripts/",
+    "binding.gyp",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "install": "prebuild-install --runtime napi || node-gyp rebuild",
     "postinstall": "node scripts/postinstall.js",

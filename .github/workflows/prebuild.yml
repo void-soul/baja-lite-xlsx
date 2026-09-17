@@ -307,3 +307,60 @@ jobs:
             - ✅ TypeScript 类型支持
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    # Publishes the npm package AFTER the GitHub release assets exist, so a
+    # fresh `npm install baja-lite-xlsx@<version>` can immediately download
+    # the matching prebuilt binary from the release.
+    #
+    # Uses npm Trusted Publishing (OIDC) -- no NPM_TOKEN secret required.
+    # One-time setup on npmjs.com:
+    #   package page -> Settings -> Trusted Publisher -> GitHub Actions
+    #     Organization/user: void-soul
+    #     Repository:        baja-lite-xlsx
+    #     Workflow filename: prebuild.yml
+    #     Environment:       (leave empty)
+    name: Publish to npm
+    needs: [release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+          echo "version=$PKG_VERSION" >> "$GITHUB_ENV"
+
+      - name: Check whether this version is already on npm
+        id: registry
+        run: |
+          if npm view "baja-lite-xlsx@$version" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "Version $version is already published; skipping npm publish."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
+        if: steps.registry.outputs.published == 'false'
+        run: npm install -g npm@latest
+
+      - name: Publish to npm
+        if: steps.registry.outputs.published == 'false'
+        run: npm publish --provenance --access public
