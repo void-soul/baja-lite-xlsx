@@ -29,6 +29,7 @@
     "copy-dlls:dev": "node scripts/package-dlls.js",
     "clean": "node-gyp clean",
     "test": "node test/test.js",
+    "bench": "node bench/bench.js",
     "checksums": "node scripts/generate-checksums.js",
     "verify:prebuild": "node scripts/verify-prebuild.js prebuilds",
     "example": "node examples/basic.js",

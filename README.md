@@ -211,6 +211,19 @@ one batch rather than the whole sheet. The return value changes to
 they do in the buffered case. Images are attached per row, so streaming still
 returns them.
 
+### Benchmarking
+
+```bash
+npm run bench                     # examples/sample.xlsx
+npm run bench -- huge.xlsx        # your own file
+npm run bench -- huge.xlsx --iterations 3 --batch 20000
+```
+
+It reports best/median wall time, rows per second and retained memory for the
+buffered, image-less, column-projected and streamed paths. On a large file the
+streamed row stays flat in memory while the buffered rows grow with the sheet,
+which is the fastest way to see what the options above buy.
+
 ## Building from source
 
 All platforms use [vcpkg](https://github.com/microsoft/vcpkg) with the `xlnt`

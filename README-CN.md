@@ -193,6 +193,17 @@ const { rowCount, warnings } = readTableAsJSON('huge.xlsx', {
 `{ rowCount, warnings }`，不会累积行。其余选项（`columns`、`includeImages`、
 `skipRows`、`headerMap` 等）行为与一次性读取完全一致，图片同样按行归属后返回。
 
+### 基准测试
+
+```bash
+npm run bench                     # 默认用 examples/sample.xlsx
+npm run bench -- huge.xlsx        # 指定自己的文件
+npm run bench -- huge.xlsx --iterations 3 --batch 20000
+```
+
+会打印一次性读取、跳过图片、列投影、流式四类场景的最优/中位耗时、行数与驻留内存。
+大文件上流式那一行内存恒定，而一次性读取会随表规模增长——这是最直观的验证方式。
+
 ## 从源码编译
 
 各平台统一使用 [vcpkg](https://github.com/microsoft/vcpkg) 的 `xlnt` 与 `libzip`
