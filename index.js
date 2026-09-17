@@ -186,6 +186,8 @@ function validateOptions(options) {
     maxCols,
     includeImages,
     columns,
+    onBatch,
+    batchSize,
     includeWarnings
   };
 }
