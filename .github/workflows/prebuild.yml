@@ -24,25 +24,29 @@ jobs:
         with:
           node-version: '20'
       
-      - name: Export VCPKG_ROOT
-        run: |
-          $root = $env:VCPKG_INSTALLATION_ROOT
-          if (-not $root) { $root = 'C:\vcpkg' }
-          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
-        shell: pwsh
-
-      - name: Cache vcpkg binaries
+      - name: Cache vcpkg
         uses: actions/cache@v4
         with:
-          path: vcpkg-bincache
-          key: vcpkg-xlnt-libzip-x64-windows
+          path: |
+            C:\vcpkg-ci
+            vcpkg-bincache
+          key: vcpkg-master-xlnt-libzip-x64-windows
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          if (-not (Test-Path C:\vcpkg-ci\.git)) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg-ci
+          }
+          & C:\vcpkg-ci\bootstrap-vcpkg.bat -disableMetrics
+          "VCPKG_ROOT=C:\vcpkg-ci" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Install vcpkg dependencies
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path vcpkg-bincache | Out-Null
-          $env:VCPKG_DEFAULT_BINARY_CACHE = (Resolve-Path vcpkg-bincache)
-          vcpkg install xlnt:x64-windows libzip:x64-windows --recurse
+          $env:VCPKG_DEFAULT_BINARY_CACHE = "$env:GITHUB_WORKSPACE\vcpkg-bincache"
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_ROOT\vcpkg.exe" install xlnt:x64-windows libzip:x64-windows --recurse
 
       - name: Verify vcpkg installation
         shell: pwsh

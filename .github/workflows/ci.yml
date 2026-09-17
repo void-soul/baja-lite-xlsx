@@ -21,11 +21,12 @@ jobs:
       - name: Syntax-check all JS files
         run: |
           for f in index.js test/test.js scripts/*.js scripts/lib/*.js examples/*.js; do
-            node --check "$f"
+            if [ -f "$f" ]; then node --check "$f"; fi
           done
       - name: Typecheck declarations
-        # @types/node comes from devDependencies.
-        run: npx --yes typescript@5 tsc --noEmit --skipLibCheck --types node index.d.ts
+        # @types/node comes from devDependencies. "-p" is required: bare
+        # "npx typescript@5 tsc" cannot resolve the tsc binary.
+        run: npx --yes -p typescript@5 tsc --noEmit --skipLibCheck --types node index.d.ts
 
   build-test:
     name: Build & test (windows)
@@ -35,23 +36,31 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Export VCPKG_ROOT
-        shell: pwsh
-        run: |
-          $root = $env:VCPKG_INSTALLATION_ROOT
-          if (-not $root) { $root = 'C:\vcpkg' }
-          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Cache vcpkg binaries
+      # The runners' preinstalled vcpkg is too old for the preinstalled
+      # MSVC 18 toolchain (cmake/ninja configure failures), so use a fresh
+      # vcpkg checkout -- the same setup that made the tag release job's
+      # "vcpkg install" step succeed.
+      - name: Cache vcpkg
         uses: actions/cache@v4
         with:
-          path: vcpkg-bincache
-          key: vcpkg-xlnt-libzip-x64-windows
+          path: |
+            C:\vcpkg-ci
+            vcpkg-bincache
+          key: vcpkg-master-xlnt-libzip-x64-windows
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          if (-not (Test-Path C:\vcpkg-ci\.git)) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg-ci
+          }
+          & C:\vcpkg-ci\bootstrap-vcpkg.bat -disableMetrics
+          "VCPKG_ROOT=C:\vcpkg-ci" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Install vcpkg dependencies
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path vcpkg-bincache | Out-Null
-          $env:VCPKG_DEFAULT_BINARY_CACHE = (Resolve-Path vcpkg-bincache)
-          vcpkg install xlnt:x64-windows libzip:x64-windows --recurse
+          $env:VCPKG_DEFAULT_BINARY_CACHE = "$env:GITHUB_WORKSPACE\vcpkg-bincache"
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_ROOT\vcpkg.exe" install xlnt:x64-windows libzip:x64-windows --recurse
       - name: Build native addon
         run: npm run build
       - name: Copy runtime DLLs
