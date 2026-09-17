@@ -1,6 +1,7 @@
 #include <napi.h>
 #include "xlsx_reader.h"
 
+#include <atomic>
 #include <cmath>
 #include <map>
 #include <string>
