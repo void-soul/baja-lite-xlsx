@@ -15,6 +15,12 @@ Security & robustness:
 
 Fixes:
 
+- WPS workbooks with proprietary relationship types (e.g.
+  `http://www.wps.cn/officeDocument/2020/cellImage`) no longer fail with
+  `xlnt::exception: key not found in container`: loading is retried through
+  a sanitized copy that strips non-standard workbook relationships
+  (reported via `warnings`); images are still extracted from the original
+  file.
 - Number cells no longer forced to 6 fixed decimals (shortest round-trip
   formatting); date cells render as deterministic `YYYY-MM-DD[ HH:MM:SS]`.
 - Drawing anchors are mapped to their sheets via `workbook.xml` +

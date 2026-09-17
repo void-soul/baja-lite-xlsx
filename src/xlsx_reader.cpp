@@ -1,11 +1,13 @@
 #include "xlsx_reader.h"
 #include "image_extractor.h"
+#include "zip_reader.h"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <map>
 #include <sstream>
+#include <utility>
 
 namespace baja_xlsx {
 
@@ -82,9 +84,34 @@ bool XlsxReader::load(const std::string& filepath) {
         lastError_.clear();
         return true;
     } catch (const std::exception& e) {
+        const std::string firstError = e.what();
+
+        // Vendor extensions break xlnt: WPS writes proprietary relationship
+        // types (e.g. http://www.wps.cn/officeDocument/2020/cellImage) which
+        // make it abort with "key not found in container", rendering valid
+        // WPS files unreadable. Retry through a sanitized copy that keeps
+        // only standard relationship types. Images are still extracted from
+        // the ORIGINAL file, so nothing is lost there.
+        std::string tempPath;
+        std::string sanitizeError;
+        if (zipio::createSanitizedCopy(filepath, tempPath, sanitizeError)) {
+            try {
+                workbook_.load(tempPath);
+                loaded_ = true;
+                lastError_.clear();
+                warnings_.push_back(
+                    "Loaded via sanitized copy: non-standard workbook relationship "
+                    "types were stripped (xlnt error: " + firstError + ")");
+                std::remove(tempPath.c_str());
+                return true;
+            } catch (...) {
+                std::remove(tempPath.c_str());
+            }
+        }
+
         // AUDIT-20260917-001 is addressed by callers on Windows: pass a
         // filesystem path encoded for the platform (see index.js and README).
-        lastError_ = std::string("FILE_OPEN_FAILED|Failed to load file: ") + e.what();
+        lastError_ = std::string("FILE_OPEN_FAILED|Failed to load file: ") + firstError;
         loaded_ = false;
         return false;
     }
