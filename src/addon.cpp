@@ -4,6 +4,7 @@
 #include <cmath>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -47,14 +48,34 @@ bool hasPendingException(Env env) {
 // XlsxReader::readExcel, AUDIT-20260917-034).
 // ---------------------------------------------------------------------------
 
-// One shared Buffer per image index (AUDIT-20260917-017: no per-cell copies).
-Object createImageObject(Env env, const ImageData& img,
-                         std::map<int, Value>& bufferCache, int imageIndex) {
-    auto cached = bufferCache.find(imageIndex);
-    if (cached != bufferCache.end()) {
-        return cached->second.As<Object>();
+// P1-1: every distinct cell value is emitted once into a string pool and
+// cells carry the pool index instead of a fresh V8 string. Low-cardinality
+// columns (status flags, categories, repeated codes) then allocate one string
+// instead of one per row.
+class StringPool {
+public:
+    uint32_t intern(const std::string& text) {
+        auto it = index_.find(text);
+        if (it != index_.end()) {
+            return it->second;
+        }
+        const uint32_t id = static_cast<uint32_t>(values_.size());
+        index_.emplace(text, id);
+        values_.push_back(text);
+        return id;
     }
 
+    const std::vector<std::string>& values() const { return values_; }
+
+private:
+    std::unordered_map<std::string, uint32_t> index_;
+    std::vector<std::string> values_;
+};
+
+// One shared image object per index: images travel as their own array and
+// cells reference them, so no Buffer is ever copied per cell
+// (AUDIT-20260917-017).
+Object createImageObject(Env env, const ImageData& img) {
     Object imgObj = Object::New(env);
     imgObj.Set("name", String::New(env, img.name));
     imgObj.Set("type", String::New(env, img.type));
@@ -62,32 +83,35 @@ Object createImageObject(Env env, const ImageData& img,
         img.data.data(),
         static_cast<size_t>(img.data.size()));
     imgObj.Set("data", buffer);
-    bufferCache[imageIndex] = imgObj;
     return imgObj;
 }
 
-Value cellToJsValue(Env env, const CellValue& cell,
+// Cell encoding (decoded in index.js):
+//   >= 0 -> index into the string pool
+//   <  0 -> -(imageIndex + 1)
+//   array -> several images on one cell
+Value cellToJsIndex(Env env, const CellValue& cell,
                     const std::vector<ImageData>& images,
-                    std::map<int, Value>& bufferCache) {
+                    StringPool& pool) {
     if (cell.imageIndices.empty()) {
-        return String::New(env, cell.text);
+        return Number::New(env, static_cast<double>(pool.intern(cell.text)));
     }
     if (cell.imageIndices.size() == 1) {
         const int idx = cell.imageIndices[0];
         if (idx >= 0 && idx < static_cast<int>(images.size())) {
-            return createImageObject(env, images[idx], bufferCache, idx);
+            return Number::New(env, -static_cast<double>(idx + 1));
         }
-        return String::New(env, cell.text);
+        return Number::New(env, static_cast<double>(pool.intern(cell.text)));
     }
 
-    Array imgArray = Array::New(env, cell.imageIndices.size());
+    Array encoded = Array::New(env, cell.imageIndices.size());
     uint32_t out = 0;
     for (int idx : cell.imageIndices) {
         if (idx >= 0 && idx < static_cast<int>(images.size())) {
-            imgArray.Set(out++, createImageObject(env, images[idx], bufferCache, idx));
+            encoded.Set(out++, Number::New(env, -static_cast<double>(idx + 1)));
         }
     }
-    return imgArray;
+    return encoded;
 }
 
 Array stringArray(Env env, const std::vector<std::string>& values) {
@@ -101,8 +125,7 @@ Array stringArray(Env env, const std::vector<std::string>& values) {
 // Takes a non-const ExcelData so each row can be moved out while it is
 // converted: the C++ copy is released row by row instead of staying fully
 // resident next to the JS result (P0-5).
-Array sheetsToArray(Env env, ExcelData& data,
-                    std::map<int, Value>& bufferCache) {
+Array sheetsToArray(Env env, ExcelData& data, StringPool& pool) {
     Array result = Array::New(env, data.sheets.size());
 
     for (size_t i = 0; i < data.sheets.size(); ++i) {
@@ -120,7 +143,7 @@ Array sheetsToArray(Env env, ExcelData& data,
             Array rowArray = Array::New(env, rowData.size());
             for (size_t col = 0; col < rowData.size(); ++col) {
                 rowArray.Set(static_cast<uint32_t>(col),
-                             cellToJsValue(env, rowData[col], data.images, bufferCache));
+                             cellToJsIndex(env, rowData[col], data.images, pool));
             }
             dataArray.Set(static_cast<uint32_t>(row), rowArray);
         }
@@ -138,13 +161,11 @@ Array sheetsToArray(Env env, ExcelData& data,
     return result;
 }
 
-Array imagesToArray(Env env, const std::vector<ImageData>& images,
-                    std::map<int, Value>& bufferCache) {
+Array imagesToArray(Env env, const std::vector<ImageData>& images) {
     Array result = Array::New(env, images.size());
     for (size_t i = 0; i < images.size(); ++i) {
         if (hasPendingException(env)) return result;
-        result.Set(static_cast<uint32_t>(i),
-                   createImageObject(env, images[i], bufferCache, static_cast<int>(i)));
+        result.Set(static_cast<uint32_t>(i), createImageObject(env, images[i]));
     }
     return result;
 }
@@ -183,10 +204,11 @@ Array warningsToArray(Env env, const std::vector<std::string>& warnings) {
 }
 
 Object buildResult(Env env, ExcelData& data) {
-    std::map<int, Value> bufferCache;
+    StringPool pool;
     Object result = Object::New(env);
-    result.Set("sheets", sheetsToArray(env, data, bufferCache));
-    result.Set("images", imagesToArray(env, data.images, bufferCache));
+    result.Set("sheets", sheetsToArray(env, data, pool));
+    result.Set("strings", stringArray(env, pool.values()));
+    result.Set("images", imagesToArray(env, data.images));
     result.Set("imagePositions", positionsToArray(env, data.imagePositions));
     result.Set("warnings", warningsToArray(env, data.warnings));
     return result;

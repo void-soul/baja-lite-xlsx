@@ -211,10 +211,30 @@ function transformToRows(nativeResult, opts) {
     );
   }
 
+  // Cells arrive from the native layer as small integers: >= 0 indexes the
+  // shared string pool, < 0 references an image (P1-1). Decoding here means
+  // repeated values all point at the same V8 string.
+  const pool = nativeResult.strings || [];
+  const images = nativeResult.images || [];
+  const decode = (value) => {
+    if (typeof value === 'number') {
+      return value < 0 ? images[-value - 1] : pool[value];
+    }
+    if (Array.isArray(value)) {
+      return value.map(decode);
+    }
+    return value;
+  };
+
   // With column projection the native layer reports the resolved header
-  // texts; otherwise the header row itself provides them.
-  const headerSource =
+  // texts; otherwise the header row itself provides them (also encoded, so
+  // decode first).
+  const rawHeaders =
     (targetSheet.headers && targetSheet.headers.length) ? targetSheet.headers : sheetData[headerRow];
+  const headerSource = rawHeaders.map((header) => {
+    const text = typeof header === 'number' ? decode(header) : header;
+    return typeof text === 'string' ? text : '';
+  });
   const mappedHeaders = headerSource.map((header) => headerMap[header] || header);
   const skipRowsSet = new Set([headerRow, ...skipRows]);
 
@@ -226,7 +246,8 @@ function transformToRows(nativeResult, opts) {
     const rowObj = {};
     for (let colIndex = 0; colIndex < mappedHeaders.length; colIndex++) {
       const header = mappedHeaders[colIndex];
-      const value = row[colIndex] !== undefined ? row[colIndex] : '';
+      const raw = row[colIndex];
+      const value = raw === undefined || raw === null ? '' : decode(raw);
       if (header) {
         rowObj[header] = value;
       }

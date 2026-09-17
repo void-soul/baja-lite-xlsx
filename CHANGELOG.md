@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.19 (2026-09-18) — performance
+
+- Cell values travel through a shared string pool: every distinct value
+  becomes one V8 string and cells carry its index, so low-cardinality columns
+  (status flags, categories, repeated codes) no longer allocate a string per
+  row. Images are referenced by index too, which removes the last per-cell
+  object allocation.
+
 ## 1.0.18 (2026-09-18) — performance
 
 - Buffer / base64 input is parsed straight from memory
