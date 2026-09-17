@@ -14,13 +14,11 @@ const fs = require('fs');
 const path = require('path');
 
 // DLLs required for the native module to load on Windows.
-const REQUIRED_DLLS = ['xlnt.dll', 'zlib1.dll'];
+const REQUIRED_DLLS = ['xlnt.dll', 'zip.dll'];
 
-// DLLs copied when available but not strictly required.
-const OPTIONAL_DLLS = ['bz2.dll', 'fmt.dll', 'zip.dll', 'zlib.dll'];
-
-// DLLs embedded into Windows prebuild archives.
-const PACKAGED_DLLS = ['xlnt.dll', 'zlib1.dll', 'bz2.dll', 'fmt.dll', 'zip.dll'];
+// DLLs copied when available but not strictly required (the exact set of
+// transitive runtime dependencies depends on the vcpkg port features).
+const OPTIONAL_DLLS = ['zlib1.dll', 'zlib.dll', 'bz2.dll', 'fmt.dll', 'liblzma.dll', 'zstd.dll'];
 
 // Candidate vcpkg "installed/<triplet>/bin" directories, best first.
 function candidateBinDirs() {
@@ -51,11 +49,29 @@ function findDll(dllName) {
   return null;
 }
 
+/**
+ * Every DLL in the vcpkg bin directory.
+ *
+ * The hardcoded list above is not enough: what libzip/xlnt pull in at
+ * runtime depends on the vcpkg port features (zlib vs zlib1, liblzma,
+ * zstd, ...). Shipping the whole bin directory is the only future-proof
+ * way to avoid "The specified module could not be found" (ERR_DLOPEN_FAILED).
+ */
+function listBinDlls() {
+  const dir = findBinDir();
+  if (!dir) return [];
+  try {
+    return fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.dll'));
+  } catch (err) {
+    return [];
+  }
+}
+
 module.exports = {
   REQUIRED_DLLS,
   OPTIONAL_DLLS,
-  PACKAGED_DLLS,
   candidateBinDirs,
   findBinDir,
-  findDll
+  findDll,
+  listBinDlls
 };

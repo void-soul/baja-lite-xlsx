@@ -15,14 +15,17 @@ console.log('Adding DLL files to Windows prebuild archives...');
 const prebuildsDir = path.join(__dirname, '..', 'prebuilds');
 const buildReleaseDir = path.join(__dirname, '..', 'build', 'Release');
 
-// Ensure the DLLs are present in build/Release first.
+// Ensure the runtime DLLs are present in build/Release first.
+// Every DLL from the vcpkg bin directory is shipped: transitive runtime
+// dependencies vary with the vcpkg port features (see scripts/lib/vcpkg.js).
 if (os.platform() === 'win32') {
+  const binDlls = vcpkg.listBinDlls();
   let copiedCount = 0;
-  vcpkg.PACKAGED_DLLS.forEach((dllName) => {
+  for (const dllName of binDlls) {
     const targetPath = path.join(buildReleaseDir, dllName);
     if (fs.existsSync(targetPath)) {
       copiedCount++;
-      return;
+      continue;
     }
     const sourcePath = vcpkg.findDll(dllName);
     if (sourcePath) {
@@ -33,11 +36,9 @@ if (os.platform() === 'win32') {
       } catch (err) {
         console.error(`  x ${dllName} - copy failed: ${err.message}`);
       }
-    } else {
-      console.log(`  ! ${dllName} - not found (skipped)`);
     }
-  });
-  console.log(`Prepared ${copiedCount} DLL files`);
+  }
+  console.log(`Prepared ${copiedCount} DLL file(s) from vcpkg bin`);
 }
 
 if (!fs.existsSync(prebuildsDir)) {
@@ -65,23 +66,23 @@ tarFiles.forEach((tarFile) => {
     // 1. Extract existing archive (execFileSync: no shell, no quoting issues).
     execFileSync('tar', ['-xzf', tarPath, '-C', tempDir], { stdio: 'pipe' });
 
-    // 2. Add DLLs.
+    // 2. Add every DLL that the Release build ships with.
     const targetDir = path.join(tempDir, 'build', 'Release');
     fs.mkdirSync(targetDir, { recursive: true });
 
+    const releaseDlls = fs.existsSync(buildReleaseDir)
+      ? fs.readdirSync(buildReleaseDir).filter((f) => f.toLowerCase().endsWith('.dll'))
+      : [];
+
     let addedCount = 0;
-    vcpkg.PACKAGED_DLLS.forEach((dllName) => {
+    for (const dllName of releaseDlls) {
       const sourcePath = path.join(buildReleaseDir, dllName);
-      if (fs.existsSync(sourcePath)) {
-        fs.copyFileSync(sourcePath, path.join(targetDir, dllName));
-        const stats = fs.statSync(path.join(targetDir, dllName));
-        console.log(`  + ${dllName} (${(stats.size / 1024).toFixed(1)} KB)`);
-        addedCount++;
-      } else {
-        console.log(`  ! ${dllName} - not found (skipped)`);
-      }
-    });
-    console.log(`Added ${addedCount} DLL files`);
+      fs.copyFileSync(sourcePath, path.join(targetDir, dllName));
+      const stats = fs.statSync(path.join(targetDir, dllName));
+      console.log(`  + ${dllName} (${(stats.size / 1024).toFixed(1)} KB)`);
+      addedCount++;
+    }
+    console.log(`Added ${addedCount} DLL file(s)`);
 
     // 3. Repack.
     fs.unlinkSync(tarPath);

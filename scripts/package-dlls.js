@@ -1,6 +1,9 @@
 /**
- * Copy vcpkg DLL files into build/Release.
- * vcpkg lookup now lives in scripts/lib/vcpkg.js (single source of truth).
+ * Copy the vcpkg runtime DLLs into build/Release.
+ *
+ * Copies EVERY DLL from the vcpkg bin directory (see scripts/lib/vcpkg.js
+ * for why a hardcoded list is not enough: libzip/xlnt transitive runtime
+ * dependencies vary with port features and caused ERR_DLOPEN_FAILED).
  */
 
 const fs = require('fs');
@@ -27,25 +30,32 @@ if (!sourceDir) {
   process.exit(0);
 }
 
-console.log(`Copying DLLs from ${sourceDir}...`);
+const dlls = vcpkg.listBinDlls();
+
+if (dlls.length === 0) {
+  console.log(`No DLLs found in ${sourceDir}, skipping DLL copy`);
+  process.exit(0);
+}
+
+console.log(`Copying ${dlls.length} DLL(s) from ${sourceDir}...`);
 
 let copiedCount = 0;
-
-[...vcpkg.REQUIRED_DLLS, ...vcpkg.OPTIONAL_DLLS].forEach((dllName) => {
+for (const dllName of dlls) {
   const sourcePath = path.join(sourceDir, dllName);
   const targetPath = path.join(buildDir, dllName);
-
-  if (fs.existsSync(sourcePath)) {
-    try {
-      fs.copyFileSync(sourcePath, targetPath);
-      console.log(`  + ${dllName}`);
-      copiedCount++;
-    } catch (err) {
-      console.error(`  x ${dllName} - copy failed: ${err.message}`);
-    }
-  } else {
-    console.log(`  ! ${dllName} - not found in vcpkg bin`);
+  try {
+    fs.copyFileSync(sourcePath, targetPath);
+    copiedCount++;
+  } catch (err) {
+    console.error(`  x ${dllName} - copy failed: ${err.message}`);
   }
-});
+}
 
-console.log(`Copied ${copiedCount} DLL files`);
+console.log(`Copied ${copiedCount}/${dlls.length} DLL file(s)`);
+
+const missingRequired = vcpkg.REQUIRED_DLLS.filter(
+  (name) => !fs.existsSync(path.join(buildDir, name))
+);
+if (missingRequired.length > 0) {
+  console.warn(`WARNING: required DLL(s) still missing: ${missingRequired.join(', ')}`);
+}
