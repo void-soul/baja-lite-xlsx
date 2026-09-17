@@ -10,7 +10,7 @@ const path = require('path');
 console.log('=== 嵌入式图片处理示例 ===\n');
 
 // 使用示例文件
-const excelFile = './test/sample.xlsx';
+const excelFile = path.join(__dirname, 'sample.xlsx');
 
 // 检查文件是否存在
 if (!fs.existsSync(excelFile)) {

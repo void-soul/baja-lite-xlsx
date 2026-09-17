@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  lint:
+    name: Lint & typecheck (JS/TS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # --ignore-scripts skips the native "install"/"postinstall" scripts;
+      # no package.json surgery needed.
+      - run: npm install --ignore-scripts
+      - name: Syntax-check all JS files
+        run: |
+          for f in index.js test/test.js scripts/*.js scripts/lib/*.js examples/*.js; do
+            node --check "$f"
+          done
+      - name: Typecheck declarations
+        # @types/node comes from devDependencies.
+        run: npx --yes typescript@5 tsc --noEmit --skipLibCheck --types node index.d.ts
+
+  build-test:
+    name: Build & test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Export VCPKG_ROOT
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) { $root = 'C:\vcpkg' }
+          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-xlnt-zip-x64-windows
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path vcpkg-bincache | Out-Null
+          $env:VCPKG_DEFAULT_BINARY_CACHE = (Resolve-Path vcpkg-bincache)
+          vcpkg install xlnt:x64-windows zip:x64-windows --recurse
+      - name: Build native addon
+        run: npm run build
+      - name: Copy runtime DLLs
+        run: node scripts/package-dlls.js
+      - name: Test
+        run: npm test
+
+  release:
+    # Publishes the prebuilt Windows archives (bundled DLLs) plus checksums
+    # to the GitHub Release matching the tag, so `prebuild-install` finds
+    # them at {binary.host}v{version}/. Linux/macOS prebuilds are not
+    # produced yet (binding.gyp static-link transitive deps unverified).
+    name: Build prebuilds & publish (tag v*)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, build-test]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Export VCPKG_ROOT
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) { $root = 'C:\vcpkg' }
+          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-xlnt-zip-x64-windows
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path vcpkg-bincache | Out-Null
+          $env:VCPKG_DEFAULT_BINARY_CACHE = (Resolve-Path vcpkg-bincache)
+          vcpkg install xlnt:x64-windows zip:x64-windows --recurse
+      - name: Install JS dependencies
+        run: npm install
+      - name: Create prebuilds (napi + electron, DLLs bundled)
+        run: npm run prebuild
+      - name: Test
+        run: npm test
+      - name: Generate checksums
+        run: npm run checksums
+      - name: Publish to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$env:GITHUB_REF_NAME" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$env:GITHUB_REF_NAME" --title "$env:GITHUB_REF_NAME" --generate-notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $assets = Get-ChildItem prebuilds -File |
+            Where-Object { $_.Name -match '\.(tar\.gz|zip)$' -or $_.Name -eq 'checksums.txt' } |
+            ForEach-Object { $_.FullName }
+          if ($assets.Count -eq 0) { Write-Error 'No prebuild assets found'; exit 1 }
+          gh release upload "$env:GITHUB_REF_NAME" @assets --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output "Published $($assets.Count) assets to $env:GITHUB_REF_NAME"
