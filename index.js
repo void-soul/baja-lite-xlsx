@@ -3,209 +3,341 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 
-// Try to load the native addon
-let addon;
-try {
-  addon = require('./build/Release/baja_xlsx.node');
-} catch (err) {
+// ---------------------------------------------------------------------------
+// Native addon loading
+// ---------------------------------------------------------------------------
+
+function loadAddon() {
   try {
-    addon = require('./build/Debug/baja_xlsx.node');
-  } catch (err2) {
-    throw new Error(
-      'Native addon not found. Please run "npm install" or "npm run build" first.\n' +
-      'Make sure you have installed xlnt library via vcpkg or system package manager.'
-    );
+    return require('./build/Release/baja_xlsx.node');
+  } catch (err) {
+    try {
+      return require('./build/Debug/baja_xlsx.node');
+    } catch (err2) {
+      const e = new Error(
+        'Native addon not found. Please run "npm install" or "npm run build" first.\n' +
+        'Make sure you have installed xlnt + libzip via vcpkg (VCPKG_ROOT) or the system package manager.'
+      );
+      e.code = 'ADDON_NOT_FOUND';
+      throw e;
+    }
   }
 }
 
+const addon = loadAddon();
+
+// ---------------------------------------------------------------------------
+// Error helper: every error carries a machine-readable `code`
+// (AUDIT-20260917-039).
+// ---------------------------------------------------------------------------
+
+function makeError(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  return e;
+}
+
+// ---------------------------------------------------------------------------
+// Temporary files for Buffer / base64 input
+// ---------------------------------------------------------------------------
+
+const TEMP_FILE_PATTERN = /^excel-[0-9a-f]{32}\.xlsx$/;
+const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// Best-effort cleanup of temp files left behind by earlier crashed runs
+// (AUDIT-20260917-036).
+function cleanupOldTempFiles() {
+  try {
+    const tempDir = os.tmpdir();
+    const now = Date.now();
+    for (const name of fs.readdirSync(tempDir)) {
+      if (!TEMP_FILE_PATTERN.test(name)) continue;
+      const full = path.join(tempDir, name);
+      try {
+        const stats = fs.statSync(full);
+        if (now - stats.mtimeMs > TEMP_MAX_AGE_MS) {
+          fs.unlinkSync(full);
+        }
+      } catch (err) {
+        // ignore individual entry failures
+      }
+    }
+  } catch (err) {
+    // cleanup is best-effort only
+  }
+}
+
+function writeTempFile(buffer) {
+  cleanupOldTempFiles();
+  const tempFile = path.join(
+    os.tmpdir(),
+    `excel-${crypto.randomBytes(16).toString('hex')}.xlsx`
+  );
+  fs.writeFileSync(tempFile, buffer);
+  return tempFile;
+}
+
+function removeTempFile(filepath) {
+  try {
+    fs.unlinkSync(filepath);
+  } catch (err) {
+    if (process.env.DEBUG) {
+      console.warn(`[baja-lite-xlsx] failed to remove temp file ${filepath}: ${err.message}`);
+    }
+  }
+}
+
+function looksLikeBase64(input) {
+  return input.length > 500 &&
+         /^[A-Za-z0-9+/=\s]+$/.test(input) &&
+         (input.startsWith('UEs') || input.startsWith('PK') ||
+          input.includes('AAAA') || input.includes('////'));
+}
+
 /**
- * 处理不同类型的输入，统一转换为文件路径
- * @param {string|Buffer} input - 文件路径、Buffer 或 base64 字符串
- * @returns {{filepath: string, cleanup: function}} 文件路径和清理函数
+ * Normalizes the input (path | Buffer | base64) into a file path.
  * @private
  */
-function prepareFilePath(input) {
-  // 情况1: Buffer
+function prepareFilePath(input, inputEncoding) {
   if (Buffer.isBuffer(input)) {
-    // 创建临时文件
-    const tempDir = os.tmpdir();
-    const tempFile = path.join(tempDir, `excel-${crypto.randomBytes(16).toString('hex')}.xlsx`);
-    
-    fs.writeFileSync(tempFile, input);
-    
-    return {
-      filepath: tempFile,
-      cleanup: () => {
-        try {
-          fs.unlinkSync(tempFile);
-        } catch (err) {
-          // 忽略删除错误
-        }
-      }
-    };
+    const filepath = writeTempFile(input);
+    return { filepath, cleanup: () => removeTempFile(filepath) };
   }
-  
-  // 情况2: 字符串
+
   if (typeof input === 'string') {
-    // 检查是否是 base64
-    // base64 特征：很长的字符串（>500），只包含 base64 字符，且包含常见的文件头（如 UEs/PK）
-    const isBase64 = input.length > 500 &&
-                     /^[A-Za-z0-9+/=\s]+$/.test(input) &&
-                     (input.startsWith('UEs') || input.startsWith('PK') || 
-                      input.includes('AAAA') || input.includes('////'));
-    
-    if (isBase64) {
-      // base64 字符串，转换为 Buffer 然后写入临时文件
-      const buffer = Buffer.from(input, 'base64');
-      const tempDir = os.tmpdir();
-      const tempFile = path.join(tempDir, `excel-${crypto.randomBytes(16).toString('hex')}.xlsx`);
-      
-      fs.writeFileSync(tempFile, buffer);
-      
-      return {
-        filepath: tempFile,
-        cleanup: () => {
-          try {
-            fs.unlinkSync(tempFile);
-          } catch (err) {
-            // 忽略删除错误
-          }
-        }
-      };
-    } else {
-      // 文件路径
-      const absolutePath = path.isAbsolute(input) ? input : path.resolve(input);
-      
-      if (!fs.existsSync(absolutePath)) {
-        throw new Error(`File not found: ${absolutePath}`);
+    let buffer = null;
+
+    if (inputEncoding === 'base64') {
+      buffer = Buffer.from(input, 'base64');
+    } else if (inputEncoding !== undefined) {
+      throw makeError(
+        'INVALID_INPUT',
+        `Unsupported inputEncoding "${inputEncoding}" (expected "base64" or undefined)`
+      );
+    } else if (looksLikeBase64(input)) {
+      // Heuristic path (AUDIT-20260917-025): decoded bytes must carry the
+      // ZIP "PK" magic; otherwise fail with an explicit, actionable error
+      // instead of misinterpreting the input.
+      buffer = Buffer.from(input, 'base64');
+      if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+        throw makeError(
+          'INVALID_INPUT',
+          'Input string looks like base64 but does not decode to an xlsx (ZIP "PK") header. ' +
+          'Pass { inputEncoding: "base64" } explicitly, or provide a file path / Buffer.'
+        );
       }
-      
-      return {
-        filepath: absolutePath,
-        cleanup: () => {} // 不需要清理
-      };
     }
+
+    if (buffer) {
+      const filepath = writeTempFile(buffer);
+      return { filepath, cleanup: () => removeTempFile(filepath) };
+    }
+
+    // Treat as file path. fs.statSync inside try/catch gives a coded,
+    // friendly error; the residual TOCTOU window is inherent and harmless
+    // here (AUDIT-20260917-037).
+    const absolutePath = path.isAbsolute(input) ? input : path.resolve(input);
+    try {
+      fs.statSync(absolutePath);
+    } catch (err) {
+      throw makeError('FILE_NOT_FOUND', `File not found: ${absolutePath}`);
+    }
+    return { filepath: absolutePath, cleanup: () => {} };
   }
-  
-  throw new Error('Input must be a file path (string), Buffer, or base64 string');
+
+  throw makeError('INVALID_INPUT', 'Input must be a file path (string), Buffer, or base64 string');
 }
 
+// ---------------------------------------------------------------------------
+// Options validation (AUDIT-20260917-024)
+// ---------------------------------------------------------------------------
 
-/**
- * 读取Excel表格并返回JSON数组
- * @param {string|Buffer} input - Excel文件路径、Buffer 或 base64 字符串
- * @param {Object} options - 配置选项
- * @param {string} [options.sheetName] - 指定Sheet名称，不传则读取第一个Sheet
- * @param {number} [options.headerRow=0] - 表头所在行索引（从0开始）
- * @param {number[]} [options.skipRows=[]] - 需要跳过的行索引数组
- * @param {Object<string, string>} [options.headerMap={}] - 表头映射，将原表头映射为新的属性名
- * @returns {Array<Object>} JSON数组，每个元素代表一行数据
- * 
- * @example
- * // 使用文件路径
- * const data1 = readTableAsJSON('./sample.xlsx', {
- *   sheetName: 'Sheet1',
- *   headerRow: 0,
- *   skipRows: [1, 2],
- *   headerMap: {
- *     '名称': 'name',
- *     '年龄': 'age'
- *   }
- * });
- * 
- * // 使用 Buffer
- * const buffer = fs.readFileSync('./sample.xlsx');
- * const data2 = readTableAsJSON(buffer, { headerRow: 0 });
- * 
- * // 使用 base64
- * const base64 = buffer.toString('base64');
- * const data3 = readTableAsJSON(base64, { headerRow: 0 });
- */
-function readTableAsJSON(input, options = {}) {
-  if (!input) {
-    throw new Error('Input is required (filepath, Buffer, or base64 string)');
+function validateOptions(options) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw makeError('INVALID_OPTIONS', 'options must be an object');
   }
-  
-  const { filepath, cleanup } = prepareFilePath(input);
-  
-  try {
-    // 默认选项
-    const {
-      sheetName = null,
-      headerRow = 0,
-      skipRows = [],
-      headerMap = {}
-    } = options;
-    
-    // 读取Excel数据
-    const excelData = addon.readExcel(filepath);
-  
-  // 选择目标Sheet
+  const {
+    sheetName = null,
+    headerRow = 0,
+    skipRows = [],
+    headerMap = {},
+    inputEncoding,
+    maxRows = 0,
+    maxCols = 0,
+    includeWarnings = false
+  } = options;
+
+  if (sheetName !== null && sheetName !== undefined && typeof sheetName !== 'string') {
+    throw makeError('INVALID_OPTIONS', 'options.sheetName must be a string');
+  }
+  if (!Number.isInteger(headerRow) || headerRow < 0) {
+    throw makeError('INVALID_OPTIONS', `options.headerRow must be a non-negative integer, got ${headerRow}`);
+  }
+  if (!Array.isArray(skipRows)) {
+    throw makeError('INVALID_OPTIONS', 'options.skipRows must be an array of row indices');
+  }
+  for (const r of skipRows) {
+    if (!Number.isInteger(r) || r < 0) {
+      throw makeError('INVALID_OPTIONS', `options.skipRows must contain non-negative integers, got ${r}`);
+    }
+  }
+  if (headerMap === null || typeof headerMap !== 'object' || Array.isArray(headerMap)) {
+    throw makeError('INVALID_OPTIONS', 'options.headerMap must be an object');
+  }
+  if (maxRows !== undefined && !Number.isInteger(maxRows) || maxRows < 0) {
+    throw makeError('INVALID_OPTIONS', `options.maxRows must be a non-negative integer, got ${maxRows}`);
+  }
+  if (maxCols !== undefined && !Number.isInteger(maxCols) || maxCols < 0) {
+    throw makeError('INVALID_OPTIONS', `options.maxCols must be a non-negative integer, got ${maxCols}`);
+  }
+  if (typeof includeWarnings !== 'boolean') {
+    throw makeError('INVALID_OPTIONS', 'options.includeWarnings must be a boolean');
+  }
+
+  return {
+    sheetName: sheetName === undefined ? null : sheetName,
+    headerRow,
+    skipRows,
+    headerMap,
+    maxRows,
+    maxCols,
+    includeWarnings
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Sheet data -> JSON rows
+// ---------------------------------------------------------------------------
+
+function transformToRows(nativeResult, opts) {
+  const { sheetName, headerRow, skipRows, headerMap, includeWarnings } = opts;
+
   let targetSheet;
   if (sheetName) {
-    targetSheet = excelData.sheets.find(sheet => sheet.name === sheetName);
+    targetSheet = nativeResult.sheets.find((sheet) => sheet.name === sheetName);
     if (!targetSheet) {
-      throw new Error(`未找到名为 "${sheetName}" 的Sheet`);
+      throw makeError('SHEET_NOT_FOUND', `Sheet "${sheetName}" not found`);
     }
   } else {
-    if (excelData.sheets.length === 0) {
-      throw new Error('Excel文件中没有Sheet');
+    if (nativeResult.sheets.length === 0) {
+      throw makeError('NO_SHEETS', 'Excel file has no sheets');
     }
-    targetSheet = excelData.sheets[0];
+    targetSheet = nativeResult.sheets[0];
   }
-  
+
   const sheetData = targetSheet.data;
-  
-  // 检查数据是否足够
+
   if (sheetData.length <= headerRow) {
-    throw new Error(`表头行索引 ${headerRow} 超出数据范围（共 ${sheetData.length} 行）`);
+    throw makeError(
+      'HEADER_ROW_OUT_OF_RANGE',
+      `Header row index ${headerRow} is out of range (${sheetData.length} rows available)`
+    );
   }
-  
-  // 获取表头
+
   const headers = sheetData[headerRow];
-  
-  // 应用表头映射
-  const mappedHeaders = headers.map(header => {
-    return headerMap[header] || header;
-  });
-  
-  // 创建跳过行的Set（包含表头行）
+  const mappedHeaders = headers.map((header) => headerMap[header] || header);
   const skipRowsSet = new Set([headerRow, ...skipRows]);
-  
-  // 构建JSON数组
-  const result = [];
-  
+
+  const rows = [];
   for (let rowIndex = 0; rowIndex < sheetData.length; rowIndex++) {
-    // 跳过指定的行
-    if (skipRowsSet.has(rowIndex)) {
-      continue;
-    }
-    
+    if (skipRowsSet.has(rowIndex)) continue;
+
     const row = sheetData[rowIndex];
     const rowObj = {};
-    
-    // 填充数据
-    // 注意：所有图片（嵌入式和浮动图片）都已经在 C++ 层直接转换为 { data: Buffer, name, type } 对象
     for (let colIndex = 0; colIndex < mappedHeaders.length; colIndex++) {
       const header = mappedHeaders[colIndex];
-      const value = row[colIndex] || '';
-      
-      // 只有在表头不为空时才添加属性
+      const value = row[colIndex] !== undefined ? row[colIndex] : '';
       if (header) {
         rowObj[header] = value;
       }
     }
-    
-    result.push(rowObj);
+    rows.push(rowObj);
   }
-  
-  return result;
+
+  if (includeWarnings) {
+    return { rows, warnings: nativeResult.warnings || [] };
+  }
+  return rows;
+}
+
+function runNative(filepath, opts) {
+  return addon.readExcel(filepath, opts.maxRows, opts.maxCols);
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Read an Excel table and return it as a JSON array.
+ *
+ * @param {string|Buffer} input - File path, Buffer, or base64 string
+ *   (when passing base64 explicitly, set options.inputEncoding = 'base64').
+ * @param {Object} [options]
+ * @param {string} [options.sheetName] - Sheet to read (default: first sheet).
+ * @param {number} [options.headerRow=0] - Header row index (0-based).
+ * @param {number[]} [options.skipRows=[]] - Row indices to skip (0-based).
+ * @param {Object<string,string>} [options.headerMap={}] - Header renames.
+ * @param {string} [options.inputEncoding] - Force input interpretation: 'base64'.
+ * @param {number} [options.maxRows=0] - Cap on rows read per sheet (0 = no cap).
+ * @param {number} [options.maxCols=0] - Cap on columns read per sheet (0 = no cap).
+ * @param {boolean} [options.includeWarnings=false] - Return { rows, warnings }.
+ * @returns {Array<Object>|{rows: Array<Object>, warnings: string[]}}
+ */
+function readTableAsJSON(input, options = {}) {
+  if (input === null || input === undefined || input === '') {
+    throw makeError('INVALID_INPUT', 'Input is required (filepath, Buffer, or base64 string)');
+  }
+
+  const opts = validateOptions(options);
+  const { filepath, cleanup } = prepareFilePath(input, options.inputEncoding);
+
+  try {
+    const nativeResult = runNative(filepath, opts);
+    return transformToRows(nativeResult, opts);
+  } catch (err) {
+    if (!err.code) {
+      err.code = 'PARSE_ERROR';
+    }
+    throw err;
   } finally {
     cleanup();
   }
 }
 
+/**
+ * Async variant of readTableAsJSON: parsing runs on the libuv thread pool
+ * so the event loop (and any Electron UI) is not blocked.
+ *
+ * @param {string|Buffer} input - See readTableAsJSON.
+ * @param {Object} [options] - See readTableAsJSON.
+ * @returns {Promise<Array<Object>|{rows: Array<Object>, warnings: string[]}>}
+ */
+async function readTableAsJSONAsync(input, options = {}) {
+  if (input === null || input === undefined || input === '') {
+    throw makeError('INVALID_INPUT', 'Input is required (filepath, Buffer, or base64 string)');
+  }
+
+  const opts = validateOptions(options);
+  const { filepath, cleanup } = prepareFilePath(input, options.inputEncoding);
+
+  try {
+    let nativeResult;
+    try {
+      nativeResult = await addon.readExcelAsync(filepath, opts.maxRows, opts.maxCols);
+    } catch (err) {
+      if (!err.code) {
+        err.code = 'PARSE_ERROR';
+      }
+      throw err;
+    }
+    return transformToRows(nativeResult, opts);
+  } finally {
+    cleanup();
+  }
+}
 
 module.exports = {
-  readTableAsJSON
+  readTableAsJSON,
+  readTableAsJSONAsync
 };
