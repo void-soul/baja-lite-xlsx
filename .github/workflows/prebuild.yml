@@ -122,23 +122,31 @@ jobs:
         shell: powershell
       
       - name: Verify package contents
+        shell: pwsh
         run: |
           $tarFiles = Get-ChildItem prebuilds -Filter *.tar.gz
-          if ($tarFiles.Count -gt 0) {
-            $firstFile = $tarFiles[0]
-            Write-Host "Extracting $($firstFile.Name) to verify contents..."
-            $extractPath = "temp_verify"
-            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-            tar -xzf $firstFile.FullName -C $extractPath
-            Write-Host "Package contents:"
-            Get-ChildItem $extractPath -Recurse -File | Select-Object Name, @{{Name="Size(KB)";Expression={{[math]::Round($_.Length/1KB, 1)}}}}
-            $dllFiles = Get-ChildItem $extractPath -Recurse -Filter "*.dll"
-            Write-Host ""
-            Write-Host "Found $($dllFiles.Count) DLL files:"
-            $dllFiles | Select-Object -ExpandProperty Name
-            Remove-Item $extractPath -Recurse -Force
+          if ($tarFiles.Count -eq 0) {
+            Write-Error 'No .tar.gz prebuild archives were produced'
+            exit 1
           }
-        shell: powershell
+          $firstFile = $tarFiles[0]
+          Write-Host "Extracting $($firstFile.Name) to verify contents..."
+          $extractPath = 'temp_verify'
+          New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+          tar -xzf $firstFile.FullName -C $extractPath
+          Write-Host 'Package contents:'
+          Get-ChildItem $extractPath -Recurse -File |
+            Select-Object FullName, @{Name = 'SizeKB'; Expression = { [math]::Round($_.Length / 1KB, 1) } } |
+            Format-Table -AutoSize
+
+          $nodeFiles = Get-ChildItem $extractPath -Recurse -Filter *.node
+          $dllFiles = Get-ChildItem $extractPath -Recurse -Filter *.dll
+          Write-Host "Found $($nodeFiles.Count) native module(s) and $($dllFiles.Count) DLL file(s):"
+          $dllFiles | Select-Object -ExpandProperty Name
+
+          if ($nodeFiles.Count -eq 0) { Write-Error 'Prebuild archive does not contain a .node file'; exit 1 }
+          if ($dllFiles.Count -eq 0) { Write-Error 'Prebuild archive does not contain the runtime DLLs'; exit 1 }
+          Remove-Item $extractPath -Recurse -Force
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
