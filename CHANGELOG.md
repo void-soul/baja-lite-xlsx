@@ -54,8 +54,10 @@ Engineering:
   hardcoded list.
 - Cross-platform archive verification (`npm run verify:prebuild`) asserts every
   published archive contains the `.node` module (and DLLs on Windows).
-- README is bilingual (English first, 简体中文 section); all other artifacts
-  (code, comments, scripts, CHANGELOG, workflow output) are English-only.
+- Documentation layout: `README.md` is English, `README-CN.md` is Chinese
+  (cross-linked, both shipped in the npm tarball); every other artifact
+  (code, comments, scripts, CHANGELOG, commit messages, release output) is
+  English-only.
 - npm publishing automated in the release workflow via npm Trusted
   Publishing (OIDC, no stored token); runs only after the GitHub Release
   assets exist and skips versions already on the registry.
