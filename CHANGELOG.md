@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.18 (2026-09-18) — performance
+
+- Buffer / base64 input is parsed straight from memory
+  (`workbook::load(const std::vector<uint8_t>&)` + a libzip memory source).
+  No temporary file is written, so those callers no longer pay for a full
+  write + read round-trip of the workbook, and nothing is left behind on
+  crash. The only remaining disk use is the rare WPS sanitizing fallback.
+
 ## 1.0.17 (2026-09-17) — performance
 
 Zero API change:

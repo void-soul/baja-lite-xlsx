@@ -77,11 +77,19 @@ public:
     // lastError_ as "CODE|message".
     ExcelData readExcel(const std::string& filepath, const ReadOptions& options);
 
+    // Same, for an in-memory package (P0-4: no temporary file).
+    ExcelData readExcel(const std::vector<uint8_t>& bytes, const ReadOptions& options);
+
     // Last error in "CODE|message" form; empty when no error occurred.
     std::string getLastError() const { return lastError_; }
 
 private:
     bool load(const std::string& filepath);
+    bool load(const std::vector<uint8_t>& bytes);
+    bool readRequestedSheet(const ReadOptions& options, ExcelData& data);
+    // Exactly one of `filepath` / `bytes` is non-null.
+    void readImages(const std::string* filepath, const std::vector<uint8_t>* bytes,
+                    const ReadOptions& options, ExcelData& data);
     void readSheet(xlnt::worksheet ws, const ReadOptions& options, ExcelData& data);
     // Maps options.columns onto 1-based column indices and fills
     // sheet.headers. Returns an empty vector when projection is off.

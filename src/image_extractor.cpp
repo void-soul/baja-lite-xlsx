@@ -289,17 +289,12 @@ void ImageExtractor::parseCellImagesXml(const std::string& xmlContent,
     }
 }
 
-bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
-                                     std::vector<ImageInfo>& outImages,
-                                     std::vector<DrawingAnchor>& outAnchors,
-                                     std::vector<CellImageInfo>& outCellImages,
-                                     std::vector<std::string>& warnings) {
+bool ImageExtractor::extractFromZip(zip_t* za,
+                                    std::vector<ImageInfo>& outImages,
+                                    std::vector<DrawingAnchor>& outAnchors,
+                                    std::vector<CellImageInfo>& outCellImages,
+                                    std::vector<std::string>& warnings) {
     std::string err;
-    zip_t* za = zipio::openReadOnly(xlsxPath, err);
-    if (!za) {
-        lastError_ = err;
-        return false;
-    }
 
     // Pass 1: relationship documents.
     std::map<std::string, std::map<std::string, std::string>> drawingRelsMap; // "drawing1" -> rId map
@@ -419,8 +414,39 @@ bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
         }
     }
 
-    zipio::close(za);
     return true;
+}
+
+bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
+                                     std::vector<ImageInfo>& outImages,
+                                     std::vector<DrawingAnchor>& outAnchors,
+                                     std::vector<CellImageInfo>& outCellImages,
+                                     std::vector<std::string>& warnings) {
+    std::string err;
+    zip_t* za = zipio::openReadOnly(xlsxPath, err);
+    if (!za) {
+        lastError_ = err;
+        return false;
+    }
+    const bool ok = extractFromZip(za, outImages, outAnchors, outCellImages, warnings);
+    zipio::close(za);
+    return ok;
+}
+
+bool ImageExtractor::extractFromMemory(const std::vector<uint8_t>& bytes,
+                                       std::vector<ImageInfo>& outImages,
+                                       std::vector<DrawingAnchor>& outAnchors,
+                                       std::vector<CellImageInfo>& outCellImages,
+                                       std::vector<std::string>& warnings) {
+    std::string err;
+    zip_t* za = zipio::openReadOnlyMemory(bytes, err);
+    if (!za) {
+        lastError_ = err;
+        return false;
+    }
+    const bool ok = extractFromZip(za, outImages, outAnchors, outCellImages, warnings);
+    zipio::close(za);
+    return ok;
 }
 
 } // namespace baja_xlsx

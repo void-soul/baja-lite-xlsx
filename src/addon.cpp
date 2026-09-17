@@ -5,6 +5,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace Napi;
 using namespace baja_xlsx;
@@ -212,6 +213,35 @@ bool readNumberOption(Env env, const Object& opts, const char* name, size_t& out
     return true;
 }
 
+// Input is either a file path or the workbook bytes. Buffer input is parsed
+// straight from memory (P0-4), so Buffer / base64 callers never pay for a
+// temporary file round-trip.
+bool readInputArgument(const CallbackInfo& info, std::string& filepath,
+                       std::vector<uint8_t>& bytes, bool& fromMemory) {
+    Env env = info.Env();
+    fromMemory = false;
+
+    if (info.Length() < 1) {
+        TypeError::New(env, "Input expected (file path or Buffer)")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    if (info[0].IsString()) {
+        filepath = info[0].As<String>().Utf8Value();
+        return true;
+    }
+    if (info[0].IsBuffer()) {
+        Buffer<uint8_t> buffer = info[0].As<Buffer<uint8_t>>();
+        bytes.assign(buffer.Data(), buffer.Data() + buffer.Length());
+        fromMemory = true;
+        return true;
+    }
+
+    TypeError::New(env, "Input must be a file path (string) or a Buffer")
+        .ThrowAsJavaScriptException();
+    return false;
+}
+
 // Reads the options object: { sheetName, headerRow, maxRows, maxCols,
 // includeImages, columns }. Everything is optional, so a caller that only
 // needs one option still writes `{ sheetName: 'Sheet2' }`.
@@ -290,8 +320,10 @@ bool parseReadOptions(const CallbackInfo& info, size_t index, ReadOptions& out) 
 Value ReadExcel(const CallbackInfo& info) {
     Env env = info.Env();
 
-    if (info.Length() < 1 || !info[0].IsString()) {
-        TypeError::New(env, "String expected for filepath").ThrowAsJavaScriptException();
+    std::string filepath;
+    std::vector<uint8_t> bytes;
+    bool fromMemory = false;
+    if (!readInputArgument(info, filepath, bytes, fromMemory)) {
         return env.Null();
     }
 
@@ -300,10 +332,9 @@ Value ReadExcel(const CallbackInfo& info) {
         return env.Null();
     }
 
-    std::string filepath = info[0].As<String>().Utf8Value();
-
     XlsxReader reader;
-    ExcelData data = reader.readExcel(filepath, options);
+    ExcelData data = fromMemory ? reader.readExcel(bytes, options)
+                                : reader.readExcel(filepath, options);
 
     if (!reader.getLastError().empty()) {
         return failWith(env, reader.getLastError());
@@ -323,10 +354,13 @@ Value ReadExcel(const CallbackInfo& info) {
 
 class ReadExcelWorker : public Napi::AsyncWorker {
 public:
-    ReadExcelWorker(Napi::Env env, std::string filepath, const ReadOptions& options)
+    ReadExcelWorker(Napi::Env env, std::string filepath, std::vector<uint8_t> bytes,
+                    bool fromMemory, const ReadOptions& options)
         : Napi::AsyncWorker(env),
           deferred_(Napi::Promise::Deferred::New(env)),
           filepath_(std::move(filepath)),
+          bytes_(std::move(bytes)),
+          fromMemory_(fromMemory),
           options_(options) {}
 
     Napi::Promise Promise() { return deferred_.Promise(); }
@@ -359,6 +393,8 @@ public:
 private:
     Napi::Promise::Deferred deferred_;
     std::string filepath_;
+    std::vector<uint8_t> bytes_;
+    bool fromMemory_;
     ReadOptions options_;
     ExcelData data_;
 };
@@ -366,8 +402,10 @@ private:
 Value ReadExcelAsync(const CallbackInfo& info) {
     Env env = info.Env();
 
-    if (info.Length() < 1 || !info[0].IsString()) {
-        TypeError::New(env, "String expected for filepath").ThrowAsJavaScriptException();
+    std::string filepath;
+    std::vector<uint8_t> bytes;
+    bool fromMemory = false;
+    if (!readInputArgument(info, filepath, bytes, fromMemory)) {
         return env.Null();
     }
 
@@ -376,9 +414,8 @@ Value ReadExcelAsync(const CallbackInfo& info) {
         return env.Null();
     }
 
-    auto* worker = new ReadExcelWorker(env,
-                                       info[0].As<String>().Utf8Value(),
-                                       options);
+    auto* worker = new ReadExcelWorker(env, std::move(filepath), std::move(bytes),
+                                       fromMemory, options);
     auto promise = worker->Promise();
     worker->Queue();
     return promise;

@@ -10,10 +10,20 @@ namespace baja_xlsx { namespace zipio {
 // Opens an archive read-only. Returns nullptr on failure and fills `error`.
 zip_t* openReadOnly(const std::string& path, std::string& error);
 
+// Opens an in-memory archive read-only (P0-4: Buffer / base64 input never
+// touches the disk). `bytes` must stay alive until close().
+zip_t* openReadOnlyMemory(const std::vector<uint8_t>& bytes, std::string& error);
+
+// Writes `bytes` to a temporary .xlsx file. Only used as a fallback when a
+// workbook has to be sanitized (WPS vendor parts) and no path is available.
+bool writeTempWorkbook(const std::vector<uint8_t>& bytes, std::string& outPath,
+                       std::string& error);
+
 // True when the archive contains any drawing / media / WPS cell-image part.
 // Only the central directory is scanned -- nothing is decompressed -- so this
 // is cheap enough to gate the whole image pipeline on (P0-3).
 bool packageHasMedia(const std::string& path);
+bool packageHasMedia(const std::vector<uint8_t>& bytes);
 
 // Reads one entry by exact name. Validates the declared entry size
 // (AUDIT-20260917-006: no unbounded resize on attacker-controlled sizes)

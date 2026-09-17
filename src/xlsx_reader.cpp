@@ -209,6 +209,42 @@ bool XlsxReader::load(const std::string& filepath) {
     return false;
 }
 
+bool XlsxReader::load(const std::vector<uint8_t>& bytes) {
+    // P0-4: Buffer / base64 input is parsed straight from memory, so no
+    // temporary file is written for the common case.
+    std::string firstError;
+    bool firstOk = false;
+    try {
+        workbook_.load(bytes);
+        firstOk = true;
+    } catch (const std::exception& e) {
+        firstError = e.what();
+    } catch (...) {
+        firstError = "unknown non-std exception";
+    }
+
+    if (firstOk) {
+        loaded_ = true;
+        lastError_.clear();
+        return true;
+    }
+
+    // Only the WPS sanitizing workaround needs a real file; stage one just
+    // for that rare fallback.
+    std::string tempPath;
+    std::string stageError;
+    if (zipio::writeTempWorkbook(bytes, tempPath, stageError)) {
+        const bool ok = load(tempPath);
+        std::remove(tempPath.c_str());
+        return ok;
+    }
+
+    lastError_ = std::string("FILE_OPEN_FAILED|Failed to load workbook data: ") + firstError +
+                 " [" + stageError + "]";
+    loaded_ = false;
+    return false;
+}
+
 std::string XlsxReader::cellToString(const xlnt::cell& cell) {
     if (!cell.has_value()) {
         return std::string();
@@ -401,57 +437,57 @@ void XlsxReader::readSheet(xlnt::worksheet ws, const ReadOptions& options, Excel
     data.sheets.push_back(std::move(sheet));
 }
 
-ExcelData XlsxReader::readExcel(const std::string& filepath,
-                                const ReadOptions& options) {
-    ExcelData data;
-
-    try {
-        if (!load(filepath)) {
-            return data;
+bool XlsxReader::readRequestedSheet(const ReadOptions& options, ExcelData& data) {
+    // P0-1: only the worksheet the caller asked for is materialized.
+    xlnt::worksheet ws;
+    if (options.sheetName.empty()) {
+        if (workbook_.sheet_count() == 0) {
+            lastError_ = "NO_SHEETS|Excel file has no sheets";
+            return false;
         }
+        ws = workbook_.sheet_by_index(0);
+    } else if (workbook_.contains(options.sheetName)) {
+        ws = workbook_.sheet_by_title(options.sheetName);
+    } else {
+        lastError_ = "SHEET_NOT_FOUND|Sheet \"" + options.sheetName + "\" not found";
+        return false;
+    }
 
-        // P0-1: only the worksheet the caller asked for is materialized.
-        xlnt::worksheet ws;
-        if (options.sheetName.empty()) {
-            if (workbook_.sheet_count() == 0) {
-                lastError_ = "NO_SHEETS|Excel file has no sheets";
-                return data;
-            }
-            ws = workbook_.sheet_by_index(0);
-        } else if (workbook_.contains(options.sheetName)) {
-            ws = workbook_.sheet_by_title(options.sheetName);
-        } else {
-            lastError_ = "SHEET_NOT_FOUND|Sheet \"" + options.sheetName + "\" not found";
-            return data;
-        }
+    readSheet(ws, options, data);
+    data.warnings = warnings_; // cell-level diagnostics (truncation, ...)
+    return lastError_.empty();
+}
 
-        readSheet(ws, options, data);
-        data.warnings = warnings_; // cell-level diagnostics (truncation, ...)
-        if (!lastError_.empty()) {
-            return data;
-        }
+void XlsxReader::readImages(const std::string* filepath,
+                            const std::vector<uint8_t>* bytes,
+                            const ReadOptions& options, ExcelData& data) {
+    // P0-3: the image pipeline costs a second full pass over the archive.
+    // Workbooks without media parts skip it entirely, and callers can
+    // always opt out explicitly with includeImages: false.
+    if (!options.includeImages) {
+        return;
+    }
+    if (filepath ? !zipio::packageHasMedia(*filepath)
+                 : !zipio::packageHasMedia(*bytes)) {
+        return;
+    }
 
-        // P0-3: the image pipeline costs a second full pass over the archive.
-        // Workbooks without media parts skip it entirely, and callers can
-        // always opt out explicitly with includeImages: false.
-        if (!options.includeImages || !zipio::packageHasMedia(filepath)) {
-            return data;
-        }
+    ImageExtractor extractor;
+    std::vector<ImageInfo> imageInfos;
+    std::vector<DrawingAnchor> anchors;
+    std::vector<CellImageInfo> cellImages;
 
-        ImageExtractor extractor;
-        std::vector<ImageInfo> imageInfos;
-        std::vector<DrawingAnchor> anchors;
-        std::vector<CellImageInfo> cellImages;
-
-        // Fail-open for the image side: sheet data stays usable even when
-        // media extraction fails (AUDIT-20260917-019).
-        if (!extractor.extractFromXlsx(filepath, imageInfos, anchors,
-                                       cellImages, data.warnings)) {
-            std::ostringstream oss;
-            oss << "Image extraction failed: " << extractor.getLastError();
-            data.warnings.push_back(oss.str());
-            return data;
-        }
+    // Fail-open for the image side: sheet data stays usable even when
+    // media extraction fails (AUDIT-20260917-019).
+    const bool extracted = filepath
+        ? extractor.extractFromXlsx(*filepath, imageInfos, anchors, cellImages, data.warnings)
+        : extractor.extractFromMemory(*bytes, imageInfos, anchors, cellImages, data.warnings);
+    if (!extracted) {
+        std::ostringstream oss;
+        oss << "Image extraction failed: " << extractor.getLastError();
+        data.warnings.push_back(oss.str());
+        return;
+    }
 
         // Register images; exact filename -> index (first wins on
         // duplicates, duplicates are reported).
@@ -591,27 +627,66 @@ ExcelData XlsxReader::readExcel(const std::string& filepath,
                 }
             }
         }
-    } catch (const std::exception& e) {
-        const std::string msg =
-            std::string("READ_FAILED|Exception while reading the workbook: ") + e.what();
-        // Fail open: never discard table data because post-processing
-        // (image attachment) threw -- report it as a warning instead
-        // (AUDIT-20260917-019).
-        if (data.sheets.empty()) {
-            lastError_ = msg;
-        } else {
-            data.warnings.push_back(msg);
-        }
-    } catch (...) {
-        const std::string msg =
-            "READ_FAILED|Unknown non-std exception while reading the workbook";
-        if (data.sheets.empty()) {
-            lastError_ = msg;
-        } else {
-            data.warnings.push_back(msg);
-        }
-    }
+}
 
+namespace {
+
+// Shared tail: post-processing failures must never discard table data that
+// was read successfully (AUDIT-20260917-019).
+void recordReadFailure(const std::string& message, bool hasSheets,
+                       std::string& lastError, std::vector<std::string>& warnings) {
+    if (hasSheets) {
+        warnings.push_back(message);
+    } else {
+        lastError = message;
+    }
+}
+
+} // namespace
+
+ExcelData XlsxReader::readExcel(const std::string& filepath,
+                                const ReadOptions& options) {
+    ExcelData data;
+    try {
+        if (!load(filepath)) {
+            return data;
+        }
+        if (!readRequestedSheet(options, data)) {
+            return data;
+        }
+        readImages(&filepath, nullptr, options, data);
+    } catch (const std::exception& e) {
+        recordReadFailure(
+            std::string("READ_FAILED|Exception while reading the workbook: ") + e.what(),
+            !data.sheets.empty(), lastError_, data.warnings);
+    } catch (...) {
+        recordReadFailure(
+            "READ_FAILED|Unknown non-std exception while reading the workbook",
+            !data.sheets.empty(), lastError_, data.warnings);
+    }
+    return data;
+}
+
+ExcelData XlsxReader::readExcel(const std::vector<uint8_t>& bytes,
+                                const ReadOptions& options) {
+    ExcelData data;
+    try {
+        if (!load(bytes)) {
+            return data;
+        }
+        if (!readRequestedSheet(options, data)) {
+            return data;
+        }
+        readImages(nullptr, &bytes, options, data);
+    } catch (const std::exception& e) {
+        recordReadFailure(
+            std::string("READ_FAILED|Exception while reading the workbook: ") + e.what(),
+            !data.sheets.empty(), lastError_, data.warnings);
+    } catch (...) {
+        recordReadFailure(
+            "READ_FAILED|Unknown non-std exception while reading the workbook",
+            !data.sheets.empty(), lastError_, data.warnings);
+    }
     return data;
 }
 

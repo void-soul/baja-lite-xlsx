@@ -43,10 +43,25 @@ public:
                          std::vector<CellImageInfo>& outCellImages,
                          std::vector<std::string>& warnings);
 
+    // Same extraction, but from an in-memory package: lets Buffer / base64
+    // input skip the temporary file entirely (P0-4).
+    bool extractFromMemory(const std::vector<uint8_t>& bytes,
+                           std::vector<ImageInfo>& outImages,
+                           std::vector<DrawingAnchor>& outAnchors,
+                           std::vector<CellImageInfo>& outCellImages,
+                           std::vector<std::string>& warnings);
+
     std::string getLastError() const { return lastError_; }
 
 private:
     std::string lastError_;
+
+    // Shared implementation; the caller owns `za`.
+    bool extractFromZip(zip_t* za,
+                        std::vector<ImageInfo>& outImages,
+                        std::vector<DrawingAnchor>& outAnchors,
+                        std::vector<CellImageInfo>& outCellImages,
+                        std::vector<std::string>& warnings);
 
     std::string getContentType(const std::string& extension);
 

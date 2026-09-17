@@ -208,15 +208,10 @@ bool createSanitizedCopy(const std::string& source, std::string& outTempPath,
     return true;
 }
 
-bool packageHasMedia(const std::string& path) {
-    std::string error;
-    zip_t* za = openReadOnly(path, error);
-    if (!za) {
-        // Cannot tell -> assume there is nothing to extract; sheet data is
-        // still returned in full.
-        return false;
-    }
+namespace {
 
+bool hasMediaEntries(zip_t* za) {
+    if (!za) return false;
     bool found = false;
     const zip_int64_t numEntries = zip_get_num_entries(za, 0);
     for (zip_int64_t i = 0; i < numEntries && !found; ++i) {
@@ -227,9 +222,84 @@ bool packageHasMedia(const std::string& path) {
                 entry.compare(0, 12, "xl/drawings/") == 0 ||
                 entry.compare(0, 14, "xl/cellimages/") == 0;
     }
+    return found;
+}
 
+} // namespace
+
+bool packageHasMedia(const std::string& path) {
+    std::string error;
+    zip_t* za = openReadOnly(path, error);
+    if (!za) {
+        // Cannot tell -> assume there is nothing to extract; sheet data is
+        // still returned in full.
+        return false;
+    }
+    const bool found = hasMediaEntries(za);
     close(za);
     return found;
+}
+
+bool packageHasMedia(const std::vector<uint8_t>& bytes) {
+    std::string error;
+    zip_t* za = openReadOnlyMemory(bytes, error);
+    if (!za) {
+        return false;
+    }
+    const bool found = hasMediaEntries(za);
+    close(za);
+    return found;
+}
+
+zip_t* openReadOnlyMemory(const std::vector<uint8_t>& bytes, std::string& error) {
+    error.clear();
+    if (bytes.empty()) {
+        error = "Empty workbook data";
+        return nullptr;
+    }
+
+    zip_error_t ze;
+    zip_error_init(&ze);
+    zip_source_t* src = zip_source_buffer_create(bytes.data(), bytes.size(), 0, &ze);
+    if (!src) {
+        error = std::string("Failed to open XLSX data as ZIP: ") + zip_error_strerror(&ze);
+        zip_error_fini(&ze);
+        return nullptr;
+    }
+
+    zip_t* za = zip_open_from_source(src, ZIP_RDONLY, &ze);
+    if (!za) {
+        error = std::string("Failed to open XLSX data as ZIP: ") + zip_error_strerror(&ze);
+        zip_source_free(src);
+        zip_error_fini(&ze);
+        return nullptr;
+    }
+
+    zip_error_fini(&ze);
+    return za; // takes ownership of `src`
+}
+
+bool writeTempWorkbook(const std::vector<uint8_t>& bytes, std::string& outPath,
+                       std::string& error) {
+    error.clear();
+    outPath.clear();
+    const std::string dest = makeTempWorkbookPath();
+    std::FILE* file = std::fopen(dest.c_str(), "wb");
+    if (!file) {
+        error = "Failed to create a temporary workbook copy";
+        return false;
+    }
+    const size_t written = bytes.empty()
+        ? 0
+        : std::fwrite(bytes.data(), 1, bytes.size(), file);
+    std::fclose(file);
+    if (written != bytes.size()) {
+        std::remove(dest.c_str());
+        error = "Failed to write a temporary workbook copy";
+        return false;
+    }
+    outPath = dest;
+    return true;
 }
 
 zip_t* openReadOnly(const std::string& path, std::string& error) {

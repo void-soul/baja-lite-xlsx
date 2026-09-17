@@ -1,7 +1,5 @@
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
-const crypto = require('crypto');
 
 // ---------------------------------------------------------------------------
 // Native addon loading
@@ -49,54 +47,8 @@ function makeError(code, message) {
 }
 
 // ---------------------------------------------------------------------------
-// Temporary files for Buffer / base64 input
+// Input normalization
 // ---------------------------------------------------------------------------
-
-const TEMP_FILE_PATTERN = /^excel-[0-9a-f]{32}\.xlsx$/;
-const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-
-// Best-effort cleanup of temp files left behind by earlier crashed runs
-// (AUDIT-20260917-036).
-function cleanupOldTempFiles() {
-  try {
-    const tempDir = os.tmpdir();
-    const now = Date.now();
-    for (const name of fs.readdirSync(tempDir)) {
-      if (!TEMP_FILE_PATTERN.test(name)) continue;
-      const full = path.join(tempDir, name);
-      try {
-        const stats = fs.statSync(full);
-        if (now - stats.mtimeMs > TEMP_MAX_AGE_MS) {
-          fs.unlinkSync(full);
-        }
-      } catch (err) {
-        // ignore individual entry failures
-      }
-    }
-  } catch (err) {
-    // cleanup is best-effort only
-  }
-}
-
-function writeTempFile(buffer) {
-  cleanupOldTempFiles();
-  const tempFile = path.join(
-    os.tmpdir(),
-    `excel-${crypto.randomBytes(16).toString('hex')}.xlsx`
-  );
-  fs.writeFileSync(tempFile, buffer);
-  return tempFile;
-}
-
-function removeTempFile(filepath) {
-  try {
-    fs.unlinkSync(filepath);
-  } catch (err) {
-    if (process.env.DEBUG) {
-      console.warn(`[baja-lite-xlsx] failed to remove temp file ${filepath}: ${err.message}`);
-    }
-  }
-}
 
 function looksLikeBase64(input) {
   return input.length > 500 &&
@@ -106,30 +58,33 @@ function looksLikeBase64(input) {
 }
 
 /**
- * Normalizes the input (path | Buffer | base64) into a file path.
+ * Normalizes the input (path | Buffer | base64) into either a file path or the
+ * workbook bytes. Buffers are parsed from memory, so nothing is written to
+ * disk (P0-4).
  * @private
  */
-function prepareFilePath(input, inputEncoding) {
+function prepareInput(input, inputEncoding) {
   if (Buffer.isBuffer(input)) {
-    const filepath = writeTempFile(input);
-    return { filepath, cleanup: () => removeTempFile(filepath) };
+    return { buffer: input };
   }
 
   if (typeof input === 'string') {
-    let buffer = null;
-
     if (inputEncoding === 'base64') {
-      buffer = Buffer.from(input, 'base64');
-    } else if (inputEncoding !== undefined) {
+      return { buffer: Buffer.from(input, 'base64') };
+    }
+
+    if (inputEncoding !== undefined) {
       throw makeError(
         'INVALID_INPUT',
         `Unsupported inputEncoding "${inputEncoding}" (expected "base64" or undefined)`
       );
-    } else if (looksLikeBase64(input)) {
+    }
+
+    if (looksLikeBase64(input)) {
       // Heuristic path (AUDIT-20260917-025): decoded bytes must carry the
       // ZIP "PK" magic; otherwise fail with an explicit, actionable error
       // instead of misinterpreting the input.
-      buffer = Buffer.from(input, 'base64');
+      const buffer = Buffer.from(input, 'base64');
       if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
         throw makeError(
           'INVALID_INPUT',
@@ -137,11 +92,7 @@ function prepareFilePath(input, inputEncoding) {
           'Pass { inputEncoding: "base64" } explicitly, or provide a file path / Buffer.'
         );
       }
-    }
-
-    if (buffer) {
-      const filepath = writeTempFile(buffer);
-      return { filepath, cleanup: () => removeTempFile(filepath) };
+      return { buffer };
     }
 
     // Treat as file path. fs.statSync inside try/catch gives a coded,
@@ -153,7 +104,7 @@ function prepareFilePath(input, inputEncoding) {
     } catch (err) {
       throw makeError('FILE_NOT_FOUND', `File not found: ${absolutePath}`);
     }
-    return { filepath: absolutePath, cleanup: () => {} };
+    return { filepath: absolutePath };
   }
 
   throw makeError('INVALID_INPUT', 'Input must be a file path (string), Buffer, or base64 string');
@@ -292,15 +243,27 @@ function transformToRows(nativeResult, opts) {
 // Only the requested sheet, columns and (optionally) images are ever touched
 // on the native side; everything the caller does not ask for is skipped there
 // instead of being filtered afterwards.
-function runNative(filepath, opts) {
-  return addon.readExcel(filepath, {
+function nativeOptions(opts) {
+  return {
     sheetName: opts.sheetName === null ? undefined : opts.sheetName,
     headerRow: opts.headerRow,
     maxRows: opts.maxRows,
     maxCols: opts.maxCols,
     includeImages: opts.includeImages,
     columns: opts.columns.length ? opts.columns : undefined
-  });
+  };
+}
+
+function runNative(prepared, opts) {
+  return prepared.buffer
+    ? addon.readExcel(prepared.buffer, nativeOptions(opts))
+    : addon.readExcel(prepared.filepath, nativeOptions(opts));
+}
+
+function runNativeAsync(prepared, opts) {
+  return prepared.buffer
+    ? addon.readExcelAsync(prepared.buffer, nativeOptions(opts))
+    : addon.readExcelAsync(prepared.filepath, nativeOptions(opts));
 }
 
 // ---------------------------------------------------------------------------
@@ -336,18 +299,16 @@ function readTableAsJSON(input, options = {}) {
   }
 
   const opts = validateOptions(options);
-  const { filepath, cleanup } = prepareFilePath(input, options.inputEncoding);
+  const prepared = prepareInput(input, options.inputEncoding);
 
   try {
-    const nativeResult = runNative(filepath, opts);
+    const nativeResult = runNative(prepared, opts);
     return transformToRows(nativeResult, opts);
   } catch (err) {
     if (!err.code) {
       err.code = 'PARSE_ERROR';
     }
     throw err;
-  } finally {
-    cleanup();
   }
 }
 
@@ -365,22 +326,18 @@ async function readTableAsJSONAsync(input, options = {}) {
   }
 
   const opts = validateOptions(options);
-  const { filepath, cleanup } = prepareFilePath(input, options.inputEncoding);
+  const prepared = prepareInput(input, options.inputEncoding);
 
+  let nativeResult;
   try {
-    let nativeResult;
-    try {
-      nativeResult = await addon.readExcelAsync(filepath, opts.maxRows, opts.maxCols);
-    } catch (err) {
-      if (!err.code) {
-        err.code = 'PARSE_ERROR';
-      }
-      throw err;
+    nativeResult = await runNativeAsync(prepared, opts);
+  } catch (err) {
+    if (!err.code) {
+      err.code = 'PARSE_ERROR';
     }
-    return transformToRows(nativeResult, opts);
-  } finally {
-    cleanup();
+    throw err;
   }
+  return transformToRows(nativeResult, opts);
 }
 
 module.exports = {
