@@ -587,16 +587,20 @@ public:
         RowBatchSink sink = [this](std::vector<std::vector<CellValue>>&& batch) -> bool {
             rowCount_ += batch.size();
             auto* payload = new BatchPayload{std::move(batch), this};
+            pending_.fetch_add(1);
             const napi_status status = tsf_.BlockingCall(
                 payload,
                 [](Napi::Env env, Napi::Function cb, void* ctx) {
-                    BatchPayload* batch = static_cast<BatchPayload*>(ctx);
-                    Array rows = rowsToJsArray(env, batch->rows, batch->worker->data_.images);
-                    delete batch;
+                    BatchPayload* item = static_cast<BatchPayload*>(ctx);
+                    ReadExcelBatchedWorker* worker = item->worker;
+                    Array rows = rowsToJsArray(env, item->rows, worker->data_.images);
+                    delete item;
                     cb.Call({ rows });
+                    worker->afterBatch();
                 });
             if (status != napi_ok) {
                 delete payload;
+                pending_.fetch_sub(1);
                 return false;
             }
             return true;
@@ -613,21 +617,46 @@ public:
         }
     }
 
+    // Queued batches are delivered by the event loop, which can happen after
+    // the worker completed. Resolving only once the queue has drained keeps
+    // the promise contract: every batch has run before the caller resumes.
+    void afterBatch() {
+        if (pending_.fetch_sub(1) == 1 && finished_) {
+            finish();
+        }
+    }
+
     void OnOK() override {
-        Napi::Env env = Env();
-        tsf_.Release();
-        deferred_.Resolve(makeStreamResult(env, rowCount_, data_.warnings));
+        finished_ = true;
+        if (pending_.load() == 0) {
+            finish();
+        }
     }
 
     void OnError(const Napi::Error& e) override {
-        Napi::Env env = Env();
-        tsf_.Release();
-        deferred_.Reject(makeCodedError(env, e.Message()).Value());
+        errorMessage_ = e.Message();
+        finished_ = true;
+        if (pending_.load() == 0) {
+            finish();
+        }
     }
 
     ExcelData data_; // images must stay alive while batches are converted
 
 private:
+    void finish() {
+        if (resolved_) return;
+        resolved_ = true;
+
+        Napi::Env env = Env();
+        tsf_.Release();
+        if (!errorMessage_.empty()) {
+            deferred_.Reject(makeCodedError(env, errorMessage_).Value());
+            return;
+        }
+        deferred_.Resolve(makeStreamResult(env, rowCount_, data_.warnings));
+    }
+
     Napi::Promise::Deferred deferred_;
     Napi::ThreadSafeFunction tsf_;
     std::string filepath_;
@@ -636,6 +665,10 @@ private:
     ReadOptions options_;
     size_t batchSize_;
     size_t rowCount_ = 0;
+    std::atomic<size_t> pending_{0};
+    bool finished_ = false;
+    bool resolved_ = false;
+    std::string errorMessage_;
 };
 
 Value ReadExcelBatchedAsync(const CallbackInfo& info) {
