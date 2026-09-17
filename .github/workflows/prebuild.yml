@@ -13,7 +13,8 @@ permissions:
 jobs:
   build-windows:
     name: Build Windows x64 - Node 20 + Electron 34
-    runs-on: windows-latest
+    # windows-2022 ships VS 2022, which node-gyp 10.x recognizes.
+    runs-on: windows-2022
     
     steps:
       - name: Checkout code

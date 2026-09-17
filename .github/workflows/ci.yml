@@ -30,7 +30,9 @@ jobs:
 
   build-test:
     name: Build & test (windows)
-    runs-on: windows-latest
+    # windows-2022 ships VS 2022, which node-gyp 10.x recognizes.
+    # windows-latest moved to VS 2026 (v18) which node-gyp 10.x cannot find.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,6 +63,8 @@ jobs:
           $env:VCPKG_DEFAULT_BINARY_CACHE = "$env:GITHUB_WORKSPACE\vcpkg-bincache"
           New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           & "$env:VCPKG_ROOT\vcpkg.exe" install xlnt:x64-windows libzip:x64-windows --recurse
+      - name: Install JS dependencies
+        run: npm install --ignore-scripts
       - name: Build native addon
         run: npm run build
       - name: Copy runtime DLLs

@@ -7,7 +7,7 @@
   "scripts": {
     "install": "prebuild-install --runtime napi || node-gyp rebuild",
     "postinstall": "node scripts/postinstall.js",
-    "prebuild": "npm run prebuild:create && npm run prebuild:pack-dlls",
+    "prebuilds": "npm run prebuild:create && npm run prebuild:pack-dlls",
     "prebuild:create": "npm run prebuild:napi && npm run prebuild:electron",
     "prebuild:napi": "prebuild --runtime napi --target 8 --strip",
     "prebuild:electron": "prebuild --runtime electron --target 34.0.0 --strip",
