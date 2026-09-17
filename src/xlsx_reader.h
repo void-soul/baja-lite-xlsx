@@ -1,6 +1,9 @@
 #ifndef XLSX_READER_H
 #define XLSX_READER_H
 
+#include <cstdint>
+#include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include <xlnt/xlnt.hpp>
@@ -56,6 +59,20 @@ struct ExcelData {
     std::vector<std::string> warnings;
 };
 
+// Lookup tables built once from the media parts, so image attachment can
+// happen per row while the sheet is being read (P2-1) instead of in a
+// post-pass over materialized data.
+struct ImageAttachment {
+    bool enabled = false;
+    std::map<std::string, int> imageIndexByName;
+    std::map<std::string, int> wpsIdToImage;
+    std::map<std::string, std::vector<const ImagePosition*>> anchorByCell;
+};
+
+// Streaming sink: batches of rows are handed over while the sheet is read.
+// Returning false stops the read (P2-1).
+using RowBatchSink = std::function<bool(std::vector<std::vector<CellValue>>&&)>;
+
 // Everything that steers a read. Keeping it in C++ means work the caller does
 // not ask for is never performed: only the requested sheet is materialized,
 // only the requested columns are read, and the image pipeline can be skipped
@@ -80,16 +97,33 @@ public:
     // Same, for an in-memory package (P0-4: no temporary file).
     ExcelData readExcel(const std::vector<uint8_t>& bytes, const ReadOptions& options);
 
+    // Streaming variants (P2-1): rows are pushed to `sink` in batches of
+    // `batchSize` and never accumulate, so memory stays flat on huge sheets.
+    // `data` receives images and warnings; rowCount is counted by the sink.
+    void readExcelStreamed(const std::string& filepath, const ReadOptions& options,
+                           const RowBatchSink& sink, size_t batchSize, ExcelData& data);
+    void readExcelStreamed(const std::vector<uint8_t>& bytes, const ReadOptions& options,
+                           const RowBatchSink& sink, size_t batchSize, ExcelData& data);
+
     // Last error in "CODE|message" form; empty when no error occurred.
     std::string getLastError() const { return lastError_; }
 
 private:
     bool load(const std::string& filepath);
     bool load(const std::vector<uint8_t>& bytes);
-    bool readRequestedSheet(const ReadOptions& options, ExcelData& data);
+    void runPipeline(const std::string* filepath, const std::vector<uint8_t>* bytes,
+                     const ReadOptions& options, const RowBatchSink* sink,
+                     size_t batchSize, ExcelData& data);
+    bool readRequestedSheet(const ReadOptions& options, const ImageAttachment& attach,
+                            const RowBatchSink* sink, size_t batchSize, ExcelData& data);
     // Exactly one of `filepath` / `bytes` is non-null.
     void readImages(const std::string* filepath, const std::vector<uint8_t>* bytes,
-                    const ReadOptions& options, ExcelData& data);
+                    const ReadOptions& options, ExcelData& data, ImageAttachment& attach);
+    // Attaches WPS DISPIMG and anchor images to a single row.
+    void attachRowImages(const std::string& sheetName,
+                         const std::vector<size_t>& projectedColumns,
+                         size_t rowIndex, std::vector<CellValue>& row,
+                         const ImageAttachment& attach);
     void readSheet(xlnt::worksheet ws, const ReadOptions& options, ExcelData& data);
     // Maps options.columns onto 1-based column indices and fills
     // sheet.headers. Returns an empty vector when projection is off.

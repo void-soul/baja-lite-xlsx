@@ -114,6 +114,46 @@ Value cellToJsIndex(Env env, const CellValue& cell,
     return encoded;
 }
 
+// Streaming batches carry real values (no cross-batch string pool, which
+// would keep growing for the whole read) -- see P1-1 for the buffered path.
+Value cellToJsValueDirect(Env env, const CellValue& cell,
+                          const std::vector<ImageData>& images) {
+    if (cell.imageIndices.empty()) {
+        return String::New(env, cell.text);
+    }
+    if (cell.imageIndices.size() == 1) {
+        const int idx = cell.imageIndices[0];
+        if (idx >= 0 && idx < static_cast<int>(images.size())) {
+            return createImageObject(env, images[idx]);
+        }
+        return String::New(env, cell.text);
+    }
+    Array arr = Array::New(env, cell.imageIndices.size());
+    uint32_t out = 0;
+    for (int idx : cell.imageIndices) {
+        if (idx >= 0 && idx < static_cast<int>(images.size())) {
+            arr.Set(out++, createImageObject(env, images[idx]));
+        }
+    }
+    return arr;
+}
+
+Array rowsToJsArray(Env env, const std::vector<std::vector<CellValue>>& rows,
+                    const std::vector<ImageData>& images) {
+    Array result = Array::New(env, rows.size());
+    for (size_t r = 0; r < rows.size(); ++r) {
+        if (hasPendingException(env)) return result;
+        const std::vector<CellValue>& row = rows[r];
+        Array rowArray = Array::New(env, row.size());
+        for (size_t c = 0; c < row.size(); ++c) {
+            rowArray.Set(static_cast<uint32_t>(c),
+                         cellToJsValueDirect(env, row[c], images));
+        }
+        result.Set(static_cast<uint32_t>(r), rowArray);
+    }
+    return result;
+}
+
 Array stringArray(Env env, const std::vector<std::string>& values) {
     Array result = Array::New(env, values.size());
     for (size_t i = 0; i < values.size(); ++i) {
@@ -444,6 +484,186 @@ Value ReadExcelAsync(const CallbackInfo& info) {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming entry points (P2-1): rows are pushed to a JS callback in batches
+// instead of accumulating, so memory stays flat on very large sheets.
+// ---------------------------------------------------------------------------
+
+const size_t kDefaultBatchSize = 50000;
+
+bool readBatchArgument(const CallbackInfo& info, size_t& batchSize, Function& callback) {
+    Env env = info.Env();
+
+    batchSize = kDefaultBatchSize;
+    if (info.Length() > 1 && info[1].IsObject()) {
+        size_t requested = 0;
+        if (!readNumberOption(env, info[1].As<Object>(), "batchSize", requested)) {
+            return false;
+        }
+        if (requested > 0) {
+            batchSize = requested;
+        }
+    }
+
+    if (info.Length() < 3 || !info[2].IsFunction()) {
+        TypeError::New(env, "Function expected for the batch callback")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    callback = info[2].As<Function>();
+    return true;
+}
+
+Object makeStreamResult(Env env, size_t rowCount, const std::vector<std::string>& warnings) {
+    Object result = Object::New(env);
+    result.Set("rowCount", Number::New(env, static_cast<double>(rowCount)));
+    result.Set("warnings", warningsToArray(env, warnings));
+    return result;
+}
+
+Value ReadExcelBatched(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    std::string filepath;
+    std::vector<uint8_t> bytes;
+    bool fromMemory = false;
+    if (!readInputArgument(info, filepath, bytes, fromMemory)) {
+        return env.Null();
+    }
+    ReadOptions options;
+    if (!parseReadOptions(info, 1, options)) {
+        return env.Null();
+    }
+    size_t batchSize = kDefaultBatchSize;
+    Function callback;
+    if (!readBatchArgument(info, batchSize, callback)) {
+        return env.Null();
+    }
+
+    XlsxReader reader;
+    ExcelData data;
+    size_t rowCount = 0;
+
+    RowBatchSink sink = [&](std::vector<std::vector<CellValue>>&& batch) -> bool {
+        rowCount += batch.size();
+        callback.Call({ rowsToJsArray(env, batch, data.images) });
+        return !hasPendingException(env);
+    };
+
+    if (fromMemory) {
+        reader.readExcelStreamed(bytes, options, sink, batchSize, data);
+    } else {
+        reader.readExcelStreamed(filepath, options, sink, batchSize, data);
+    }
+
+    if (!reader.getLastError().empty()) {
+        return failWith(env, reader.getLastError());
+    }
+    return makeStreamResult(env, rowCount, data.warnings);
+}
+
+class ReadExcelBatchedWorker : public Napi::AsyncWorker {
+public:
+    struct BatchPayload {
+        std::vector<std::vector<CellValue>> rows;
+        ReadExcelBatchedWorker* worker;
+    };
+
+    ReadExcelBatchedWorker(Napi::Env env, std::string filepath, std::vector<uint8_t> bytes,
+                           bool fromMemory, const ReadOptions& options, size_t batchSize,
+                           const Napi::Function& callback)
+        : Napi::AsyncWorker(env),
+          deferred_(Napi::Promise::Deferred::New(env)),
+          filepath_(std::move(filepath)),
+          bytes_(std::move(bytes)),
+          fromMemory_(fromMemory),
+          options_(options),
+          batchSize_(batchSize),
+          tsf_(Napi::ThreadSafeFunction::New(env, callback, "baja_xlsx_batch", 0, 1)) {}
+
+    Napi::Promise Promise() { return deferred_.Promise(); }
+
+    void Execute() override {
+        RowBatchSink sink = [this](std::vector<std::vector<CellValue>>&& batch) -> bool {
+            rowCount_ += batch.size();
+            auto* payload = new BatchPayload{std::move(batch), this};
+            const napi_status status = tsf_.BlockingCall(
+                payload,
+                [](Napi::Env env, Napi::Function cb, void* ctx) {
+                    BatchPayload* batch = static_cast<BatchPayload*>(ctx);
+                    Array rows = rowsToJsArray(env, batch->rows, batch->worker->data_.images);
+                    delete batch;
+                    cb.Call({ rows });
+                });
+            if (status != napi_ok) {
+                delete payload;
+                return false;
+            }
+            return true;
+        };
+
+        XlsxReader reader;
+        if (fromMemory_) {
+            reader.readExcelStreamed(bytes_, options_, sink, batchSize_, data_);
+        } else {
+            reader.readExcelStreamed(filepath_, options_, sink, batchSize_, data_);
+        }
+        if (!reader.getLastError().empty()) {
+            SetError(reader.getLastError());
+        }
+    }
+
+    void OnOK() override {
+        Napi::Env env = Env();
+        tsf_.Release();
+        deferred_.Resolve(makeStreamResult(env, rowCount_, data_.warnings));
+    }
+
+    void OnError(const Napi::Error& e) override {
+        Napi::Env env = Env();
+        tsf_.Release();
+        deferred_.Reject(makeCodedError(env, e.Message()).Value());
+    }
+
+    ExcelData data_; // images must stay alive while batches are converted
+
+private:
+    Napi::Promise::Deferred deferred_;
+    Napi::ThreadSafeFunction tsf_;
+    std::string filepath_;
+    std::vector<uint8_t> bytes_;
+    bool fromMemory_;
+    ReadOptions options_;
+    size_t batchSize_;
+    size_t rowCount_ = 0;
+};
+
+Value ReadExcelBatchedAsync(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    std::string filepath;
+    std::vector<uint8_t> bytes;
+    bool fromMemory = false;
+    if (!readInputArgument(info, filepath, bytes, fromMemory)) {
+        return env.Null();
+    }
+    ReadOptions options;
+    if (!parseReadOptions(info, 1, options)) {
+        return env.Null();
+    }
+    size_t batchSize = kDefaultBatchSize;
+    Function callback;
+    if (!readBatchArgument(info, batchSize, callback)) {
+        return env.Null();
+    }
+
+    auto* worker = new ReadExcelBatchedWorker(env, std::move(filepath), std::move(bytes),
+                                              fromMemory, options, batchSize, callback);
+    auto promise = worker->Promise();
+    worker->Queue();
+    return promise;
+}
+
+// ---------------------------------------------------------------------------
 // Init. The former native `extractImages` export is removed: it was a
 // placeholder that always returned [] silently (AUDIT-20260917-012).
 // ---------------------------------------------------------------------------
@@ -451,6 +671,8 @@ Value ReadExcelAsync(const CallbackInfo& info) {
 Object Init(Env env, Object exports) {
     exports.Set("readExcel", Function::New(env, ReadExcel));
     exports.Set("readExcelAsync", Function::New(env, ReadExcelAsync));
+    exports.Set("readExcelBatched", Function::New(env, ReadExcelBatched));
+    exports.Set("readExcelBatchedAsync", Function::New(env, ReadExcelBatchedAsync));
     return exports;
 }
 

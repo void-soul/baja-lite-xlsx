@@ -216,6 +216,62 @@ test('bad includeImages -> INVALID_OPTIONS', 'sample', (fixture) => {
 });
 
 // ---------------------------------------------------------------------------
+// Streaming batches (P2-1)
+// ---------------------------------------------------------------------------
+
+test('onBatch delivers every row', 'sample', (fixture) => {
+  const all = readTableAsJSON(fixture);
+  const seen = [];
+  const result = readTableAsJSON(fixture, {
+    onBatch: (rows) => { seen.push(...rows); }
+  });
+  assert.equal(typeof result.rowCount, 'number');
+  assert.equal(result.rowCount, seen.length);
+  assert.equal(seen.length, all.length);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(seen)),
+    JSON.parse(JSON.stringify(all))
+  );
+});
+
+test('batchSize splits the read into several batches', 'sample', (fixture) => {
+  const all = readTableAsJSON(fixture);
+  let batches = 0;
+  let largest = 0;
+  readTableAsJSON(fixture, {
+    batchSize: 1,
+    onBatch: (rows) => { batches++; largest = Math.max(largest, rows.length); }
+  });
+  assert.ok(batches >= all.length, `expected at least ${all.length} batches, got ${batches}`);
+  assert.ok(largest <= 1, 'batchSize must cap rows per callback');
+});
+
+test('onBatch reports warnings too', 'sample', (fixture) => {
+  const result = readTableAsJSON(fixture, { onBatch: () => {} });
+  assert.ok(Array.isArray(result.warnings));
+});
+
+test('bad onBatch -> INVALID_OPTIONS', 'sample', (fixture) => {
+  assert.throws(
+    () => readTableAsJSON(fixture, { onBatch: 'nope' }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+testAsync('async onBatch matches the sync result', 'sample', async (fixture) => {
+  const all = readTableAsJSON(fixture);
+  const seen = [];
+  const result = await readTableAsJSONAsync(fixture, {
+    onBatch: (rows) => { seen.push(...rows); }
+  });
+  assert.equal(result.rowCount, all.length);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(seen)),
+    JSON.parse(JSON.stringify(all))
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Buffer / base64 input
 // ---------------------------------------------------------------------------
 

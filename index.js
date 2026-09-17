@@ -128,6 +128,8 @@ function validateOptions(options) {
     maxCols = 0,
     includeImages = true,
     columns = [],
+    onBatch = null,
+    batchSize = 50000,
     includeWarnings = false
   } = options;
 
@@ -159,6 +161,12 @@ function validateOptions(options) {
   }
   if (typeof includeImages !== 'boolean') {
     throw makeError('INVALID_OPTIONS', 'options.includeImages must be a boolean');
+  }
+  if (onBatch !== null && onBatch !== undefined && typeof onBatch !== 'function') {
+    throw makeError('INVALID_OPTIONS', 'options.onBatch must be a function');
+  }
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    throw makeError('INVALID_OPTIONS', `options.batchSize must be a positive integer, got ${batchSize}`);
   }
   if (!Array.isArray(columns)) {
     throw makeError('INVALID_OPTIONS', 'options.columns must be an array of column names or references');
@@ -264,8 +272,8 @@ function transformToRows(nativeResult, opts) {
 // Only the requested sheet, columns and (optionally) images are ever touched
 // on the native side; everything the caller does not ask for is skipped there
 // instead of being filtered afterwards.
-function nativeOptions(opts) {
-  return {
+function nativeOptions(opts, streaming) {
+  const options = {
     sheetName: opts.sheetName === null ? undefined : opts.sheetName,
     headerRow: opts.headerRow,
     maxRows: opts.maxRows,
@@ -273,6 +281,90 @@ function nativeOptions(opts) {
     includeImages: opts.includeImages,
     columns: opts.columns.length ? opts.columns : undefined
   };
+  if (streaming) {
+    options.batchSize = opts.batchSize;
+  }
+  return options;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming: rows are pushed to `onBatch` in batches instead of accumulating,
+// so a million-row sheet never materializes (P2-1).
+// ---------------------------------------------------------------------------
+
+function createBatchHandler(opts) {
+  const skipRowsSet = new Set([opts.headerRow, ...opts.skipRows]);
+  let mappedHeaders = null;
+  let rowIndex = 0;     // 0-based index of the first row of the current batch
+  let delivered = 0;
+
+  const handleBatch = (batch) => {
+    // Whichever batch carries the header row defines the keys.
+    if (!mappedHeaders) {
+      const local = opts.headerRow - rowIndex;
+      if (local >= 0 && local < batch.length) {
+        const headers = batch[local].map((value) => (typeof value === 'string' ? value : ''));
+        mappedHeaders = headers.map((header) => opts.headerMap[header] || header);
+      }
+    }
+
+    const rows = [];
+    for (let i = 0; i < batch.length; i++) {
+      const globalIndex = rowIndex + i;
+      if (globalIndex === opts.headerRow || skipRowsSet.has(globalIndex)) continue;
+      if (!mappedHeaders) continue; // rows above the header row cannot be keyed
+
+      const row = batch[i];
+      const rowObj = {};
+      for (let c = 0; c < mappedHeaders.length && c < row.length; c++) {
+        const header = mappedHeaders[c];
+        if (header) {
+          rowObj[header] = row[c];
+        }
+      }
+      rows.push(rowObj);
+    }
+
+    const startIndex = rowIndex;
+    rowIndex += batch.length;
+    if (rows.length > 0) {
+      delivered += rows.length;
+      opts.onBatch(rows, { startIndex, count: rows.length });
+    }
+  };
+
+  return {
+    handleBatch,
+    // Keeps the buffered contract: a header row that never arrived is an
+    // out-of-range header row, not silently zero rows.
+    finish(warnings) {
+      if (!mappedHeaders) {
+        throw makeError(
+          'HEADER_ROW_OUT_OF_RANGE',
+          `Header row index ${opts.headerRow} is out of range (${rowIndex} rows available)`
+        );
+      }
+      return { rowCount: delivered, warnings: warnings || [] };
+    }
+  };
+}
+
+function readStreamedSync(prepared, opts) {
+  const handler = createBatchHandler(opts);
+  const options = nativeOptions(opts, true);
+  const result = prepared.buffer
+    ? addon.readExcelBatched(prepared.buffer, options, handler.handleBatch)
+    : addon.readExcelBatched(prepared.filepath, options, handler.handleBatch);
+  return handler.finish(result.warnings);
+}
+
+async function readStreamedAsync(prepared, opts) {
+  const handler = createBatchHandler(opts);
+  const options = nativeOptions(opts, true);
+  const result = await (prepared.buffer
+    ? addon.readExcelBatchedAsync(prepared.buffer, options, handler.handleBatch)
+    : addon.readExcelBatchedAsync(prepared.filepath, options, handler.handleBatch));
+  return handler.finish(result.warnings);
 }
 
 function runNative(prepared, opts) {
@@ -323,6 +415,9 @@ function readTableAsJSON(input, options = {}) {
   const prepared = prepareInput(input, options.inputEncoding);
 
   try {
+    if (opts.onBatch) {
+      return readStreamedSync(prepared, opts);
+    }
     const nativeResult = runNative(prepared, opts);
     return transformToRows(nativeResult, opts);
   } catch (err) {
@@ -348,6 +443,17 @@ async function readTableAsJSONAsync(input, options = {}) {
 
   const opts = validateOptions(options);
   const prepared = prepareInput(input, options.inputEncoding);
+
+  if (opts.onBatch) {
+    try {
+      return await readStreamedAsync(prepared, opts);
+    } catch (err) {
+      if (!err.code) {
+        err.code = 'PARSE_ERROR';
+      }
+      throw err;
+    }
+  }
 
   let nativeResult;
   try {

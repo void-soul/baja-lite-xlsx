@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.20 (2026-09-18) — performance
+
+New option:
+
+- `onBatch(rows, meta)` + `batchSize`: rows are pushed to the callback while
+  the sheet is parsed instead of being accumulated, so peak memory is one
+  batch regardless of sheet size. The call then resolves to
+  `{ rowCount, warnings }`. Works with both `readTableAsJSON` (direct
+  callback) and `readTableAsJSONAsync` (ThreadSafeFunction, batches delivered
+  on the main thread). All other options keep their behaviour, and images are
+  still attached — now per row, which is what makes streaming possible.
+
 ## 1.0.19 (2026-09-18) — performance
 
 - Cell values travel through a shared string pool: every distinct value

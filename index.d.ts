@@ -68,6 +68,16 @@ declare module 'baja-lite-xlsx' {
      * unrequested columns are never read. An empty array means all columns.
      */
     columns?: string[];
+
+    /**
+     * Stream rows in batches instead of returning them all: memory stays flat
+     * no matter how large the sheet is. When set, the call resolves to
+     * `{ rowCount, warnings }`.
+     */
+    onBatch?: OnBatch;
+
+    /** Rows per batch when `onBatch` is used. Default: 50000. */
+    batchSize?: number;
   }
 
   /** A single output row: plain string values or image objects. */
@@ -76,6 +86,24 @@ declare module 'baja-lite-xlsx' {
   /** Result shape when `includeWarnings` is true. */
   export interface ReadTableResult {
     rows: ReadTableRow[];
+    warnings: string[];
+  }
+
+  /** Meta passed to every `onBatch` call. */
+  export interface BatchMeta {
+    /** 0-based index of the first source row in this batch. */
+    startIndex: number;
+    /** Number of rows in this batch. */
+    count: number;
+  }
+
+  /** Called with each batch of rows while the sheet is being read. */
+  export type OnBatch = (rows: ReadTableRow[], meta: BatchMeta) => void;
+
+  /** Result shape when `onBatch` is used: rows are never accumulated. */
+  export interface ReadTableStreamResult {
+    /** Number of rows handed to `onBatch`. */
+    rowCount: number;
     warnings: string[];
   }
 
@@ -94,19 +122,27 @@ declare module 'baja-lite-xlsx' {
    *   INVALID_INPUT / INVALID_OPTIONS / NO_SHEETS / SHEET_NOT_FOUND /
    *   HEADER_ROW_OUT_OF_RANGE / PARSE_ERROR / READ_FAILED
    */
-  export function readTableAsJSON(input: string | Buffer, options?: ReadTableOptions): ReadTableRow[];
+  export function readTableAsJSON(
+    input: string | Buffer,
+    options: ReadTableOptions & { onBatch: OnBatch }
+  ): ReadTableStreamResult;
   export function readTableAsJSON(
     input: string | Buffer,
     options: ReadTableOptions & { includeWarnings: true }
   ): ReadTableResult;
+  export function readTableAsJSON(input: string | Buffer, options?: ReadTableOptions): ReadTableRow[];
 
   /**
    * Async variant of `readTableAsJSON`: parsing runs on the libuv thread pool
    * so the event loop is not blocked. Same options and error codes.
    */
-  export function readTableAsJSONAsync(input: string | Buffer, options?: ReadTableOptions): Promise<ReadTableRow[]>;
+  export function readTableAsJSONAsync(
+    input: string | Buffer,
+    options: ReadTableOptions & { onBatch: OnBatch }
+  ): Promise<ReadTableStreamResult>;
   export function readTableAsJSONAsync(
     input: string | Buffer,
     options: ReadTableOptions & { includeWarnings: true }
   ): Promise<ReadTableResult>;
+  export function readTableAsJSONAsync(input: string | Buffer, options?: ReadTableOptions): Promise<ReadTableRow[]>;
 }

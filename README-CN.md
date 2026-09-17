@@ -69,6 +69,15 @@ const rows5 = await readTableAsJSONAsync('big.xlsx', { maxRows: 100000 });
 
 // 只要数值时跳过整条图片处理链路（不再二次遍历压缩包、不解压媒体）
 const rows6 = await readTableAsJSONAsync('big.xlsx', { includeImages: false });
+
+// 百万行表：分批流式处理，内存保持恒定
+// => { rowCount: 1250000, warnings: [] }
+const { rowCount } = await readTableAsJSONAsync('huge.xlsx', {
+  batchSize: 50000,
+  onBatch(rows) {
+    writeToDatabase(rows);
+  }
+});
 ```
 
 ## API
@@ -166,7 +175,23 @@ const rows6 = await readTableAsJSONAsync('big.xlsx', { includeImages: false });
 2. 只要数值时传 `includeImages: false`；
 3. 用 `maxRows` / `maxCols` 限制探查读取的规模；
 4. 服务端与 Electron 用 `readTableAsJSONAsync`，多次读取可在 libuv 线程池并行
-   （由 `UV_THREADPOOL_SIZE` 控制并发度）。
+   （由 `UV_THREADPOOL_SIZE` 控制并发度）；
+5. 表太大不宜整体物化时用 `onBatch` + `batchSize`。
+
+### 用 `onBatch` 流式读取
+
+```javascript
+const { rowCount, warnings } = readTableAsJSON('huge.xlsx', {
+  batchSize: 50000,                 // 每批行数，默认 50000
+  onBatch(rows, meta) {             // meta: { startIndex, count }
+    appendToCsv(rows);
+  }
+});
+```
+
+行在解析过程中边产出边回调，峰值内存只有一个批次而非整张表；返回值变为
+`{ rowCount, warnings }`，不会累积行。其余选项（`columns`、`includeImages`、
+`skipRows`、`headerMap` 等）行为与一次性读取完全一致，图片同样按行归属后返回。
 
 ## 从源码编译
 

@@ -74,6 +74,16 @@ const rows5 = await readTableAsJSONAsync('big.xlsx', { maxRows: 100000 });
 // Skip the image pipeline entirely when you only need values:
 // no second pass over the archive, no media decompression.
 const rows6 = await readTableAsJSONAsync('big.xlsx', { includeImages: false });
+
+// Million-row sheet: stream it in batches, memory stays flat.
+// => { rowCount: 1250000, warnings: [] }
+const { rowCount } = await readTableAsJSONAsync('huge.xlsx', {
+  batchSize: 50000,
+  onBatch(rows, meta) {
+    // rows: up to 50000 row objects; meta: { startIndex, count }
+    writeToDatabase(rows);
+  }
+});
 ```
 
 ## API
@@ -180,6 +190,26 @@ Practical guidance for large files:
 3. Use `maxRows` / `maxCols` to bound a probe read.
 4. Use `readTableAsJSONAsync` in servers and Electron; several reads then run
    in parallel on the libuv thread pool (`UV_THREADPOOL_SIZE` controls it).
+5. Use `onBatch` + `batchSize` for sheets that should never be materialized.
+
+### Streaming with `onBatch`
+
+```javascript
+const { rowCount, warnings } = readTableAsJSON('huge.xlsx', {
+  batchSize: 50000,                 // rows per callback, default 50000
+  onBatch(rows, meta) {             // meta: { startIndex, count }
+    // `rows` is a normal array of row objects
+    appendToCsv(rows);
+  }
+});
+```
+
+Rows are produced and handed over while the sheet is parsed, so peak memory is
+one batch rather than the whole sheet. The return value changes to
+`{ rowCount, warnings }` — rows are never accumulated. All other options
+(`columns`, `includeImages`, `skipRows`, `headerMap`, ...) behave exactly as
+they do in the buffered case. Images are attached per row, so streaming still
+returns them.
 
 ## Building from source
 

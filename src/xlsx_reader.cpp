@@ -373,7 +373,10 @@ std::vector<size_t> XlsxReader::resolveColumns(xlnt::worksheet ws,
     return selected;
 }
 
-void XlsxReader::readSheet(xlnt::worksheet ws, const ReadOptions& options, ExcelData& data) {
+void XlsxReader::readSheet(xlnt::worksheet ws, const ReadOptions& options,
+                           const ImageAttachment& attach, const RowBatchSink* sink,
+                           size_t batchSize, ExcelData& data) {
+    const bool streaming = (sink != nullptr);
     SheetData sheet;
     sheet.name = ws.title();
 
@@ -408,7 +411,14 @@ void XlsxReader::readSheet(xlnt::worksheet ws, const ReadOptions& options, Excel
     const bool useProjection = !projected.empty();
     const size_t colCount = useProjection ? projected.size() : colCap;
 
-    for (size_t row = 1; row <= rowCap; ++row) {
+    const size_t effectiveBatch = streaming ? (batchSize > 0 ? batchSize : 1000) : 0;
+    std::vector<std::vector<CellValue>> batch;
+    if (streaming) {
+        batch.reserve(effectiveBatch);
+    }
+
+    bool stopped = false;
+    for (size_t row = 1; row <= rowCap && !stopped; ++row) {
         std::vector<CellValue> rowData;
         rowData.reserve(colCount);
         const xlnt::row_t xlRow = static_cast<xlnt::row_t>(row);
@@ -431,13 +441,101 @@ void XlsxReader::readSheet(xlnt::worksheet ws, const ReadOptions& options, Excel
             }
             rowData.push_back(std::move(value));
         }
-        sheet.data.push_back(std::move(rowData));
+
+        // Images are attached here rather than in a post-pass, so streaming
+        // never needs the whole sheet in memory (P2-1).
+        attachRowImages(sheet.name, sheet.projectedColumns, row - 1, rowData, attach);
+
+        if (!streaming) {
+            sheet.data.push_back(std::move(rowData));
+            continue;
+        }
+
+        batch.push_back(std::move(rowData));
+        if (batch.size() >= effectiveBatch) {
+            if (!(*sink)(std::move(batch))) {
+                stopped = true;
+            }
+            batch.clear();
+            batch.reserve(effectiveBatch);
+        }
+    }
+
+    if (streaming && !stopped && !batch.empty()) {
+        (*sink)(std::move(batch));
     }
 
     data.sheets.push_back(std::move(sheet));
 }
 
-bool XlsxReader::readRequestedSheet(const ReadOptions& options, ExcelData& data) {
+void XlsxReader::attachRowImages(const std::string& sheetName,
+                                 const std::vector<size_t>& projectedColumns,
+                                 size_t rowIndex, std::vector<CellValue>& row,
+                                 const ImageAttachment& attach) {
+    if (!attach.enabled) {
+        return;
+    }
+
+    for (size_t c = 0; c < row.size(); ++c) {
+        CellValue& cell = row[c];
+
+        // 1) WPS DISPIMG markers.
+        if (cell.text.rfind("__IMAGE_CELL__:", 0) == 0) {
+            const std::string imageId = cell.text.substr(15);
+            auto idIt = attach.wpsIdToImage.find(imageId);
+            if (idIt != attach.wpsIdToImage.end()) {
+                cell.imageIndices.push_back(idIt->second);
+                cell.text.clear();
+            } else {
+                std::ostringstream oss;
+                oss << "DISPIMG id '" << imageId
+                    << "' has no matching image in sheet '" << sheetName << "'";
+                warnings_.push_back(oss.str());
+                cell.text.clear();
+            }
+        } else if (cell.text == "__IMAGE_CELL__") {
+            cell.text.clear();
+        }
+
+        // 2) Anchor-based images (exact-name lookup only; the previous
+        // substring fuzzy match that could attach the wrong image is gone --
+        // AUDIT-20260917-014). With column projection `c` is a projected
+        // position, so translate it back to the source column index.
+        const size_t sourceCol = projectedColumns.empty() ? c : (projectedColumns[c] - 1);
+        const std::string key = cellKey(rowIndex, sourceCol);
+        auto anchorIt = attach.anchorByCell.find(sheetName + "\x1F" + key);
+        if (anchorIt == attach.anchorByCell.end()) {
+            continue;
+        }
+        for (const ImagePosition* pos : anchorIt->second) {
+            auto imgIt = attach.imageIndexByName.find(pos->imageName);
+            if (imgIt == attach.imageIndexByName.end()) {
+                std::ostringstream oss;
+                oss << "Anchor references missing image '" << pos->imageName
+                    << "' in sheet '" << sheetName << "'";
+                warnings_.push_back(oss.str());
+                continue;
+            }
+            const int idx = imgIt->second;
+            bool alreadyAttached = false;
+            for (int existing : cell.imageIndices) {
+                if (existing == idx) {
+                    alreadyAttached = true;
+                    break;
+                }
+            }
+            if (!alreadyAttached) {
+                cell.imageIndices.push_back(idx);
+                cell.text.clear();
+            }
+        }
+    }
+}
+
+bool XlsxReader::readRequestedSheet(const ReadOptions& options,
+                                    const ImageAttachment& attach,
+                                    const RowBatchSink* sink, size_t batchSize,
+                                    ExcelData& data) {
     // P0-1: only the worksheet the caller asked for is materialized.
     xlnt::worksheet ws;
     if (options.sheetName.empty()) {
@@ -453,20 +551,24 @@ bool XlsxReader::readRequestedSheet(const ReadOptions& options, ExcelData& data)
         return false;
     }
 
-    readSheet(ws, options, data);
-    data.warnings = warnings_; // cell-level diagnostics (truncation, ...)
+    readSheet(ws, options, attach, sink, batchSize, data);
+    // Cell-level diagnostics (truncation, attachment failures, ...). Appended
+    // rather than assigned so warnings from image extraction survive.
+    data.warnings.insert(data.warnings.end(), warnings_.begin(), warnings_.end());
     return lastError_.empty();
 }
 
 void XlsxReader::readImages(const std::string* filepath,
                             const std::vector<uint8_t>* bytes,
-                            const ReadOptions& options, ExcelData& data) {
+                            const ReadOptions& options, ExcelData& data,
+                            ImageAttachment& attach) {
     // P0-3: the image pipeline costs a second full pass over the archive.
     // Workbooks without media parts skip it entirely, and callers can
     // always opt out explicitly with includeImages: false.
     if (!options.includeImages) {
         return;
     }
+    attach.enabled = true;
     if (filepath ? !zipio::packageHasMedia(*filepath)
                  : !zipio::packageHasMedia(*bytes)) {
         return;
@@ -545,88 +647,23 @@ void XlsxReader::readImages(const std::string* filepath,
         }
 
         // Anchor-based attachment: (sheetName, row, col) -> anchor list.
-        std::map<std::string, std::vector<const ImagePosition*>> anchorByCell;
-        std::map<std::string, int> sheetIndexByName;
-        for (size_t s = 0; s < data.sheets.size(); ++s) {
-            sheetIndexByName[data.sheets[s].name] = static_cast<int>(s);
-        }
+        // Built up-front so each row can be attached as it is read, which is
+        // what lets streaming stay flat in memory (P2-1).
         for (const auto& pos : data.imagePositions) {
             if (pos.sheetName.empty()) continue;
-            auto sheetIt = sheetIndexByName.find(pos.sheetName);
-            if (sheetIt == sheetIndexByName.end()) {
+            if (!workbook_.contains(pos.sheetName)) {
                 std::ostringstream oss;
                 oss << "Drawing anchor references unknown sheet '" << pos.sheetName << "'";
                 data.warnings.push_back(oss.str());
                 continue;
             }
-            anchorByCell[pos.sheetName + "\x1F" + cellKey(
+            attach.anchorByCell[pos.sheetName + "\x1F" + cellKey(
                 static_cast<size_t>(pos.fromRow), static_cast<size_t>(pos.fromCol))]
                 .push_back(&pos);
         }
 
-        // Resolve attachments into cells.
-        for (size_t s = 0; s < data.sheets.size(); ++s) {
-            SheetData& sheet = data.sheets[s];
-            for (size_t r = 0; r < sheet.data.size(); ++r) {
-                for (size_t c = 0; c < sheet.data[r].size(); ++c) {
-                    CellValue& cell = sheet.data[r][c];
-
-                    // 1) WPS DISPIMG markers.
-                    if (cell.text.rfind("__IMAGE_CELL__:", 0) == 0) {
-                        const std::string imageId = cell.text.substr(15);
-                        auto idIt = wpsIdToImage.find(imageId);
-                        if (idIt != wpsIdToImage.end()) {
-                            cell.imageIndices.push_back(idIt->second);
-                            cell.text.clear();
-                        } else {
-                            std::ostringstream oss;
-                            oss << "DISPIMG id '" << imageId
-                                << "' has no matching image in sheet '" << sheet.name << "'";
-                            data.warnings.push_back(oss.str());
-                            cell.text.clear();
-                        }
-                    } else if (cell.text == "__IMAGE_CELL__") {
-                        cell.text.clear();
-                    }
-
-                    // 2) Anchor-based images (exact-name lookup only;
-                    // the previous substring fuzzy match that could attach
-                    // the wrong image is gone -- AUDIT-20260917-014).
-                    // With column projection `c` is a projected position, so
-                    // translate it back to the source column index.
-                    const size_t sourceCol = sheet.projectedColumns.empty()
-                                                 ? c
-                                                 : (sheet.projectedColumns[c] - 1);
-                    const std::string key = cellKey(r, sourceCol);
-                    auto anchorIt = anchorByCell.find(sheet.name + "\x1F" + key);
-                    if (anchorIt == anchorByCell.end()) {
-                        continue;
-                    }
-                    for (const ImagePosition* pos : anchorIt->second) {
-                        auto imgIt = imageIndexByName.find(pos->imageName);
-                        if (imgIt == imageIndexByName.end()) {
-                            std::ostringstream oss;
-                            oss << "Anchor references missing image '" << pos->imageName
-                                << "' in sheet '" << sheet.name << "'";
-                            data.warnings.push_back(oss.str());
-                            continue;
-                        }
-                        const int idx = imgIt->second;
-                        bool alreadyAttached = false;
-                        for (int existing : cell.imageIndices) {
-                            if (existing == idx) {
-                                alreadyAttached = true;
-                                break;
-                            }
-                        }
-                        if (!alreadyAttached) {
-                            cell.imageIndices.push_back(idx);
-                            cell.text.clear();
-                        }
-                    }
-                }
-            }
-        }
+        attach.imageIndexByName = imageIndexByName;
+        attach.wpsIdToImage = wpsIdToImage;
 }
 
 namespace {
@@ -642,6 +679,16 @@ void recordReadFailure(const std::string& message, bool hasSheets,
     }
 }
 
+// Shared pipeline: images first (so rows can be attached while they are
+// produced), then the requested worksheet -- either buffered or streamed.
+void runPipeline(XlsxReader* reader, const std::string* filepath,
+                 const std::vector<uint8_t>* bytes, const ReadOptions& options,
+                 const RowBatchSink* sink, size_t batchSize, ExcelData& data) {
+    ImageAttachment attach;
+    reader->readImages(filepath, bytes, options, data, attach);
+    reader->readRequestedSheet(options, attach, sink, batchSize, data);
+}
+
 } // namespace
 
 ExcelData XlsxReader::readExcel(const std::string& filepath,
@@ -651,10 +698,7 @@ ExcelData XlsxReader::readExcel(const std::string& filepath,
         if (!load(filepath)) {
             return data;
         }
-        if (!readRequestedSheet(options, data)) {
-            return data;
-        }
-        readImages(&filepath, nullptr, options, data);
+        runPipeline(&filepath, nullptr, options, nullptr, 0, data);
     } catch (const std::exception& e) {
         recordReadFailure(
             std::string("READ_FAILED|Exception while reading the workbook: ") + e.what(),
@@ -674,10 +718,7 @@ ExcelData XlsxReader::readExcel(const std::vector<uint8_t>& bytes,
         if (!load(bytes)) {
             return data;
         }
-        if (!readRequestedSheet(options, data)) {
-            return data;
-        }
-        readImages(nullptr, &bytes, options, data);
+        runPipeline(nullptr, &bytes, options, nullptr, 0, data);
     } catch (const std::exception& e) {
         recordReadFailure(
             std::string("READ_FAILED|Exception while reading the workbook: ") + e.what(),
@@ -688,6 +729,44 @@ ExcelData XlsxReader::readExcel(const std::vector<uint8_t>& bytes,
             !data.sheets.empty(), lastError_, data.warnings);
     }
     return data;
+}
+
+void XlsxReader::readExcelStreamed(const std::string& filepath, const ReadOptions& options,
+                                   const RowBatchSink& sink, size_t batchSize,
+                                   ExcelData& data) {
+    try {
+        if (!load(filepath)) {
+            return;
+        }
+        runPipeline(&filepath, nullptr, options, &sink, batchSize, data);
+    } catch (const std::exception& e) {
+        recordReadFailure(
+            std::string("READ_FAILED|Exception while reading the workbook: ") + e.what(),
+            !data.sheets.empty(), lastError_, data.warnings);
+    } catch (...) {
+        recordReadFailure(
+            "READ_FAILED|Unknown non-std exception while reading the workbook",
+            !data.sheets.empty(), lastError_, data.warnings);
+    }
+}
+
+void XlsxReader::readExcelStreamed(const std::vector<uint8_t>& bytes, const ReadOptions& options,
+                                   const RowBatchSink& sink, size_t batchSize,
+                                   ExcelData& data) {
+    try {
+        if (!load(bytes)) {
+            return;
+        }
+        runPipeline(nullptr, &bytes, options, &sink, batchSize, data);
+    } catch (const std::exception& e) {
+        recordReadFailure(
+            std::string("READ_FAILED|Exception while reading the workbook: ") + e.what(),
+            !data.sheets.empty(), lastError_, data.warnings);
+    } catch (...) {
+        recordReadFailure(
+            "READ_FAILED|Unknown non-std exception while reading the workbook",
+            !data.sheets.empty(), lastError_, data.warnings);
+    }
 }
 
 } // namespace baja_xlsx
