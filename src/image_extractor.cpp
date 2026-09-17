@@ -1,505 +1,393 @@
 #include "image_extractor.h"
-#include <zip.h>
+#include "zip_reader.h"
+#include "xml_parsers.h"
 #include <algorithm>
-#include <sstream>
-#include <cstring>
 
 namespace baja_xlsx {
 
-ImageExtractor::ImageExtractor() {
+namespace {
+
+// XML parts are small relative to media; cap them well below the media cap.
+const size_t kMaxXmlBytes = 16u * 1024u * 1024u;
+
+// Conservative per-media-entry cap used for image extraction.
+const size_t kMaxMediaBytes = 128u * 1024u * 1024u;
+
+std::string toLowerAscii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
 }
 
-ImageExtractor::~ImageExtractor() {
-}
+} // namespace
 
 std::string ImageExtractor::getContentType(const std::string& extension) {
-    std::string ext = extension;
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    
+    const std::string ext = toLowerAscii(extension);
     if (ext == ".png") return "image/png";
     if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
     if (ext == ".gif") return "image/gif";
     if (ext == ".bmp") return "image/bmp";
     if (ext == ".emf") return "image/x-emf";
     if (ext == ".wmf") return "image/x-wmf";
-    
     return "application/octet-stream";
 }
 
-bool ImageExtractor::readFileFromZip(void* zipArchive, const std::string& filename, 
-                                     std::vector<uint8_t>& outData) {
-    zip_t* za = static_cast<zip_t*>(zipArchive);
-    
-    // Find file in archive
-    zip_int64_t index = zip_name_locate(za, filename.c_str(), 0);
-    if (index < 0) {
-        return false;
-    }
-    
-    // Get file stats
-    struct zip_stat sb;
-    if (zip_stat_index(za, index, 0, &sb) != 0) {
-        return false;
-    }
-    
-    // Read file
-    zip_file_t* zf = zip_fopen_index(za, index, 0);
-    if (!zf) {
-        return false;
-    }
-    
-    outData.resize(sb.size);
-    zip_int64_t bytesRead = zip_fread(zf, outData.data(), sb.size);
-    zip_fclose(zf);
-    
-    return bytesRead == static_cast<zip_int64_t>(sb.size);
-}
+std::map<std::string, std::string> ImageExtractor::buildDrawingSheetMap(
+    zip_t* za, std::vector<std::string>& warnings) {
 
-std::map<std::string, std::string> ImageExtractor::parseRelationships(const std::string& xmlContent) {
-    std::map<std::string, std::string> rIdMap;
-    
-    // Parse XML like: <Relationship Id="rId1" Type="..." Target="../media/image1.png"/>
+    std::map<std::string, std::string> drawingToSheet;
+    std::vector<uint8_t> data;
+    std::string err;
+
+    // 1) xl/workbook.xml: sheet name + r:id
+    if (!zipio::readFile(za, "xl/workbook.xml", data, kMaxXmlBytes, err)) {
+        warnings.push_back("workbook.xml missing; drawings cannot be mapped to sheets");
+        return drawingToSheet;
+    }
+    const std::string workbookXml(data.begin(), data.end());
+
+    std::map<std::string, std::string> ridToName;
     size_t pos = 0;
-    while ((pos = xmlContent.find("<Relationship", pos)) != std::string::npos) {
-        size_t endPos = xmlContent.find("/>", pos);
-        if (endPos == std::string::npos) {
-            endPos = xmlContent.find("</Relationship>", pos);
+    while ((pos = xmlp::findTagOpen(workbookXml, "sheet", pos)) != std::string::npos) {
+        std::string name;
+        std::string rid;
+        xmlp::getAttribute(workbookXml, pos, "name", name);
+        xmlp::getAttribute(workbookXml, pos, "r:id", rid);
+        if (!name.empty() && !rid.empty()) {
+            ridToName[rid] = name;
         }
-        if (endPos == std::string::npos) break;
-        
-        std::string relXml = xmlContent.substr(pos, endPos - pos);
-        
-        // Extract Id
-        std::string rId;
-        size_t idPos = relXml.find("Id=\"");
-        if (idPos != std::string::npos) {
-            size_t idEnd = relXml.find("\"", idPos + 4);
-            if (idEnd != std::string::npos) {
-                rId = relXml.substr(idPos + 4, idEnd - idPos - 4);
-            }
-        }
-        
-        // Extract Target
-        std::string target;
-        size_t targetPos = relXml.find("Target=\"");
-        if (targetPos != std::string::npos) {
-            size_t targetEnd = relXml.find("\"", targetPos + 8);
-            if (targetEnd != std::string::npos) {
-                target = relXml.substr(targetPos + 8, targetEnd - targetPos - 8);
-                
-                // Extract just the filename from path like "../media/image1.png"
-                size_t lastSlash = target.find_last_of('/');
-                if (lastSlash != std::string::npos) {
-                    target = target.substr(lastSlash + 1);
-                }
-            }
-        }
-        
-        if (!rId.empty() && !target.empty()) {
-            rIdMap[rId] = target;
-        }
-        
-        pos = endPos;
+        pos += 6; // past "<sheet"
     }
-    
-    return rIdMap;
+
+    // 2) xl/_rels/workbook.xml.rels: rId -> "worksheets/sheetN.xml"
+    if (!zipio::readFile(za, "xl/_rels/workbook.xml.rels", data, kMaxXmlBytes, err)) {
+        warnings.push_back("workbook.xml.rels missing; drawings cannot be mapped to sheets");
+        return drawingToSheet;
+    }
+    const std::string workbookRels(data.begin(), data.end());
+    const std::map<std::string, std::string> ridToTarget =
+        xmlp::parseRelationships(workbookRels);
+
+    std::map<std::string, std::string> sheetTargetToName; // "sheet1.xml" -> title
+    for (const auto& kv : ridToTarget) {
+        auto nameIt = ridToName.find(kv.first);
+        if (nameIt != ridToName.end()) {
+            sheetTargetToName[kv.second] = nameIt->second;
+        }
+    }
+
+    // 3) xl/worksheets/_rels/sheetN.xml.rels: drawingN.xml -> sheet title
+    const zip_int64_t numEntries = zip_get_num_entries(za, 0);
+    for (zip_int64_t i = 0; i < numEntries; ++i) {
+        const char* entryName = zip_get_name(za, i, 0);
+        if (!entryName) continue;
+        const std::string filename(entryName);
+        if (filename.find("xl/worksheets/_rels/") != 0) continue;
+        if (filename.find(".xml.rels") == std::string::npos) continue;
+
+        std::vector<uint8_t> relData;
+        if (!zipio::readFile(za, filename, relData, kMaxXmlBytes, err)) {
+            warnings.push_back("Failed to read worksheet relationships: " + filename);
+            continue;
+        }
+        const std::string relContent(relData.begin(), relData.end());
+
+        const size_t slash = filename.find_last_of('/');
+        const std::string base = (slash != std::string::npos)
+                                     ? filename.substr(slash + 1) : filename;
+        const size_t extPos = base.find(".xml.rels");
+        const std::string sheetFile =
+            (extPos != std::string::npos) ? base.substr(0, extPos) : base; // "sheet1.xml"
+
+        auto targetIt = sheetTargetToName.find(sheetFile);
+        if (targetIt == sheetTargetToName.end()) continue;
+        const std::string& sheetName = targetIt->second;
+
+        const std::map<std::string, std::string> rels =
+            xmlp::parseRelationships(relContent);
+        for (const auto& kv : rels) {
+            if (kv.second.find("drawing") == std::string::npos) continue;
+            const size_t dot = kv.second.find(".xml");
+            const std::string drawingBase =
+                (dot != std::string::npos) ? kv.second.substr(0, dot) : kv.second;
+            drawingToSheet[drawingBase] = sheetName;
+        }
+    }
+
+    return drawingToSheet;
 }
 
-bool ImageExtractor::parseDrawingXml(const std::string& xmlContent,
+void ImageExtractor::parseDrawingXml(const std::string& xmlContent,
                                      const std::string& sheetName,
                                      const std::map<std::string, std::string>& rIdToImageMap,
-                                     std::vector<DrawingAnchor>& outAnchors) {
-    // This is a simplified parser - for production, use a proper XML library
-    // like pugixml or rapidxml
-    
-    // Parse twoCellAnchor (floating images)
-    size_t pos = 0;
-    while ((pos = xmlContent.find("<xdr:twoCellAnchor", pos)) != std::string::npos) {
-        DrawingAnchor anchor;
-        anchor.sheetName = sheetName;
-        
-        // Find the closing tag
-        size_t endPos = xmlContent.find("</xdr:twoCellAnchor>", pos);
-        if (endPos == std::string::npos) break;
-        
-        std::string anchorXml = xmlContent.substr(pos, endPos - pos);
-        
-        // Parse from coordinates
-        size_t fromPos = anchorXml.find("<xdr:from>");
-        if (fromPos != std::string::npos) {
-            size_t fromEnd = anchorXml.find("</xdr:from>", fromPos);
-            if (fromEnd == std::string::npos) fromEnd = anchorXml.length();
-            
-            std::string fromSection = anchorXml.substr(fromPos, fromEnd - fromPos);
-            
-            size_t colPos = fromSection.find("<xdr:col>");
-            size_t rowPos = fromSection.find("<xdr:row>");
-            
-            if (colPos != std::string::npos && rowPos != std::string::npos) {
-                size_t colEnd = fromSection.find("</xdr:col>", colPos);
-                size_t rowEnd = fromSection.find("</xdr:row>", rowPos);
-                
-                if (colEnd != std::string::npos && rowEnd != std::string::npos) {
-                    std::string colStr = fromSection.substr(colPos + 9, colEnd - colPos - 9);  // <xdr:col> is 9 chars
-                    std::string rowStr = fromSection.substr(rowPos + 9, rowEnd - rowPos - 9);  // <xdr:row> is 9 chars
-                    
-                    try {
-                        anchor.fromCol = std::stoi(colStr);
-                        anchor.fromRow = std::stoi(rowStr);
-                    } catch (const std::exception& e) {
-                        anchor.fromCol = 0;
-                        anchor.fromRow = 0;
-                    }
-                }
+                                     std::vector<DrawingAnchor>& outAnchors,
+                                     std::vector<std::string>& warnings) {
+    struct AnchorSpec {
+        const char* tag;
+        bool floating;
+    };
+    const AnchorSpec specs[2] = {
+        { "twoCellAnchor", true },
+        { "oneCellAnchor", false },
+    };
+
+    for (const auto& spec : specs) {
+        const std::string closing = std::string("</") + spec.tag + ">";
+        size_t pos = 0;
+        while ((pos = xmlp::findTagOpen(xmlContent, spec.tag, pos)) != std::string::npos) {
+            const size_t endPos = xmlContent.find(closing, pos);
+            if (endPos == std::string::npos) break;
+
+            auto skipAnchor = [&]() {
+                pos = endPos + closing.size();
+            };
+
+            DrawingAnchor anchor;
+            anchor.sheetName = sheetName;
+            anchor.fromCol = 0;
+            anchor.fromRow = 0;
+            anchor.toCol = 0;
+            anchor.toRow = 0;
+
+            // from coordinates (required)
+            const size_t fromTag = xmlp::findTagOpen(xmlContent, "xdr:from", pos);
+            if (fromTag == std::string::npos || fromTag >= endPos) {
+                warnings.push_back(std::string("Missing <xdr:from> in ") +
+                                   spec.tag + " for sheet '" + sheetName + "': skipped");
+                skipAnchor();
+                continue;
             }
-        }
-        
-        // Parse to coordinates
-        size_t toPos = anchorXml.find("<xdr:to>");
-        if (toPos != std::string::npos) {
-            size_t toEnd = anchorXml.find("</xdr:to>", toPos);
-            if (toEnd == std::string::npos) toEnd = anchorXml.length();
-            
-            std::string toSection = anchorXml.substr(toPos, toEnd - toPos);
-            
-            size_t colPos = toSection.find("<xdr:col>");
-            size_t rowPos = toSection.find("<xdr:row>");
-            
-            if (colPos != std::string::npos && rowPos != std::string::npos) {
-                size_t colEnd = toSection.find("</xdr:col>", colPos);
-                size_t rowEnd = toSection.find("</xdr:row>", rowPos);
-                
-                if (colEnd != std::string::npos && rowEnd != std::string::npos) {
-                    std::string colStr = toSection.substr(colPos + 9, colEnd - colPos - 9);  // <xdr:col> is 9 chars
-                    std::string rowStr = toSection.substr(rowPos + 9, rowEnd - rowPos - 9);  // <xdr:row> is 9 chars
-                    try {
-                        anchor.toCol = std::stoi(colStr);
-                        anchor.toRow = std::stoi(rowStr);
-                    } catch (...) {
-                        anchor.toCol = 0;
-                        anchor.toRow = 0;
-                    }
-                }
+            std::string colStr;
+            std::string rowStr;
+            if (!xmlp::getElementText(xmlContent, "xdr:col", fromTag, colStr) ||
+                !xmlp::getElementText(xmlContent, "xdr:row", fromTag, rowStr)) {
+                warnings.push_back(std::string("Incomplete <xdr:from> in ") +
+                                   spec.tag + " for sheet '" + sheetName + "': skipped");
+                skipAnchor();
+                continue;
             }
-        }
-        
-        // Try to find image reference (rId)
-        size_t embedPos = anchorXml.find("r:embed=\"");
-        if (embedPos != std::string::npos) {
-            size_t quoteEnd = anchorXml.find("\"", embedPos + 9);
-            if (quoteEnd != std::string::npos) {
-                std::string rId = anchorXml.substr(embedPos + 9, quoteEnd - embedPos - 9);
-                
-                // Map rId to actual image filename
+            int col = 0;
+            int row = 0;
+            if (!xmlp::parseNonNegativeInt(colStr, col) ||
+                !xmlp::parseNonNegativeInt(rowStr, row)) {
+                warnings.push_back(std::string("Invalid anchor coordinates in ") +
+                                   spec.tag + " for sheet '" + sheetName + "': skipped");
+                skipAnchor();
+                continue;
+            }
+            anchor.fromCol = col;
+            anchor.fromRow = row;
+
+            if (spec.floating) {
+                const size_t toTag = xmlp::findTagOpen(xmlContent, "xdr:to", pos);
+                std::string toColStr;
+                std::string toRowStr;
+                int toCol = 0;
+                int toRow = 0;
+                if (toTag != std::string::npos && toTag < endPos &&
+                    xmlp::getElementText(xmlContent, "xdr:col", toTag, toColStr) &&
+                    xmlp::getElementText(xmlContent, "xdr:row", toTag, toRowStr) &&
+                    xmlp::parseNonNegativeInt(toColStr, toCol) &&
+                    xmlp::parseNonNegativeInt(toRowStr, toRow)) {
+                    anchor.toCol = toCol;
+                    anchor.toRow = toRow;
+                } else {
+                    warnings.push_back(std::string("Missing/invalid <xdr:to> in ") +
+                                       spec.tag + " for sheet '" + sheetName +
+                                       "': treated as single-cell");
+                    anchor.toCol = col;
+                    anchor.toRow = row;
+                }
+            } else {
+                anchor.toCol = col; // oneCellAnchor: embedded image
+                anchor.toRow = row;
+            }
+
+            // Image reference
+            std::string rId;
+            if (xmlp::getAttributeInRange(xmlContent, pos, endPos, "r:embed", rId) &&
+                !rId.empty()) {
                 auto it = rIdToImageMap.find(rId);
                 if (it != rIdToImageMap.end()) {
                     anchor.imageName = it->second;
                 } else {
-                    // Fallback to rId if mapping not found
                     anchor.imageName = rId;
+                    warnings.push_back("Unknown relationship id '" + rId +
+                                       "' in drawing for sheet '" + sheetName + "'");
                 }
+            } else {
+                warnings.push_back(std::string("No r:embed image reference in ") +
+                                   spec.tag + " for sheet '" + sheetName + "'");
             }
+
+            if (!anchor.imageName.empty()) {
+                outAnchors.push_back(anchor);
+            }
+            pos = endPos + closing.size();
         }
-        
-        outAnchors.push_back(anchor);
-        pos = endPos;
     }
-    
-    // Parse oneCellAnchor (embedded/cell-based images)
-    // These images are anchored to a single cell
-    pos = 0;
-    while ((pos = xmlContent.find("<xdr:oneCellAnchor", pos)) != std::string::npos) {
-        DrawingAnchor anchor;
-        anchor.sheetName = sheetName;
-        
-        // Find the closing tag
-        size_t endPos = xmlContent.find("</xdr:oneCellAnchor>", pos);
-        if (endPos == std::string::npos) break;
-        
-        std::string anchorXml = xmlContent.substr(pos, endPos - pos);
-        
-        // Parse from coordinates
-        size_t fromPos = anchorXml.find("<xdr:from>");
-        if (fromPos != std::string::npos) {
-            size_t fromEnd = anchorXml.find("</xdr:from>", fromPos);
-            if (fromEnd == std::string::npos) fromEnd = anchorXml.length();
-            
-            std::string fromSection = anchorXml.substr(fromPos, fromEnd - fromPos);
-            
-            size_t colPos = fromSection.find("<xdr:col>");
-            size_t rowPos = fromSection.find("<xdr:row>");
-            
-            if (colPos != std::string::npos && rowPos != std::string::npos) {
-                size_t colEnd = fromSection.find("</xdr:col>", colPos);
-                size_t rowEnd = fromSection.find("</xdr:row>", rowPos);
-                
-                if (colEnd != std::string::npos && rowEnd != std::string::npos) {
-                    std::string colStr = fromSection.substr(colPos + 9, colEnd - colPos - 9);
-                    std::string rowStr = fromSection.substr(rowPos + 9, rowEnd - rowPos - 9);
-                    
-                    try {
-                        anchor.fromCol = std::stoi(colStr);
-                        anchor.fromRow = std::stoi(rowStr);
-                        // For oneCellAnchor, to is the same as from (embedded image)
-                        anchor.toCol = anchor.fromCol;
-                        anchor.toRow = anchor.fromRow;
-                    } catch (const std::exception& e) {
-                        anchor.fromCol = 0;
-                        anchor.fromRow = 0;
-                        anchor.toCol = 0;
-                        anchor.toRow = 0;
-                    }
-                }
-            }
-        }
-        
-        // Try to find image reference (rId)
-        size_t embedPos = anchorXml.find("r:embed=\"");
-        if (embedPos != std::string::npos) {
-            size_t quoteEnd = anchorXml.find("\"", embedPos + 9);
-            if (quoteEnd != std::string::npos) {
-                std::string rId = anchorXml.substr(embedPos + 9, quoteEnd - embedPos - 9);
-                
-                // Map rId to actual image filename
-                auto it = rIdToImageMap.find(rId);
-                if (it != rIdToImageMap.end()) {
-                    anchor.imageName = it->second;
-                } else {
-                    // Fallback to rId if mapping not found
-                    anchor.imageName = rId;
-                }
-            }
-        }
-        
-        if (!anchor.imageName.empty()) {
-            outAnchors.push_back(anchor);
-        }
-        pos = endPos;
-    }
-    
-    return true;
 }
 
-bool ImageExtractor::parseCellImagesXml(const std::string& xmlContent,
+void ImageExtractor::parseCellImagesXml(const std::string& xmlContent,
                                         const std::map<std::string, std::string>& rIdToImageMap,
-                                        std::vector<CellImageInfo>& outCellImages) {
-    // Parse WPS Excel cellimages.xml format
-    // Example:
-    // <etc:cellImage>
-    //   <xdr:pic>
-    //     <xdr:nvPicPr>
-    //       <xdr:cNvPr id="2" name="ID_C6F9C8CE7BB34DB9B1BB9835C5297155" />
-    //     </xdr:nvPicPr>
-    //     <xdr:blipFill>
-    //       <a:blip r:embed="rId1" />
-    //     </xdr:blipFill>
-    //   </xdr:pic>
-    // </etc:cellImage>
-    
+                                        std::vector<CellImageInfo>& outCellImages,
+                                        std::vector<std::string>& warnings) {
+    const std::string opening = "etc:cellImage";
+    const std::string closing = "</etc:cellImage>";
     size_t pos = 0;
-    while ((pos = xmlContent.find("<etc:cellImage>", pos)) != std::string::npos) {
-        size_t endPos = xmlContent.find("</etc:cellImage>", pos);
+    while ((pos = xmlp::findTagOpen(xmlContent, opening, pos)) != std::string::npos) {
+        const size_t endPos = xmlContent.find(closing, pos);
         if (endPos == std::string::npos) break;
-        
-        std::string cellImageXml = xmlContent.substr(pos, endPos - pos);
-        
+
         CellImageInfo cellImg;
-        
-        // Extract image ID from name attribute
-        size_t namePos = cellImageXml.find("name=\"");
-        if (namePos != std::string::npos) {
-            size_t nameEnd = cellImageXml.find("\"", namePos + 6);
-            if (nameEnd != std::string::npos) {
-                cellImg.imageId = cellImageXml.substr(namePos + 6, nameEnd - namePos - 6);
-            }
+        std::string rId;
+        xmlp::getAttributeInRange(xmlContent, pos, endPos, "name", cellImg.imageId);
+        xmlp::getAttributeInRange(xmlContent, pos, endPos, "r:embed", rId);
+
+        auto it = rIdToImageMap.find(rId);
+        if (!rId.empty() && it != rIdToImageMap.end()) {
+            cellImg.imageName = it->second;
         }
-        
-        // Extract rId from r:embed attribute
-        size_t embedPos = cellImageXml.find("r:embed=\"");
-        if (embedPos != std::string::npos) {
-            size_t embedEnd = cellImageXml.find("\"", embedPos + 9);
-            if (embedEnd != std::string::npos) {
-                std::string rId = cellImageXml.substr(embedPos + 9, embedEnd - embedPos - 9);
-                
-                // Map rId to actual image filename
-                auto it = rIdToImageMap.find(rId);
-                if (it != rIdToImageMap.end()) {
-                    cellImg.imageName = it->second;
-                }
-            }
-        }
-        
-        // Only add if we have both ID and image name
+
         if (!cellImg.imageId.empty() && !cellImg.imageName.empty()) {
             outCellImages.push_back(cellImg);
+        } else {
+            warnings.push_back("WPS cellimages.xml entry missing id or image mapping: skipped");
         }
-        
-        pos = endPos;
+        pos = endPos + closing.size();
     }
-    
-    return true;
 }
 
 bool ImageExtractor::extractFromXlsx(const std::string& xlsxPath,
                                      std::vector<ImageInfo>& outImages,
-                                     std::vector<DrawingAnchor>& outAnchors) {
-    int errorp;
-    zip_t* za = zip_open(xlsxPath.c_str(), ZIP_RDONLY, &errorp);
-    
+                                     std::vector<DrawingAnchor>& outAnchors,
+                                     std::vector<CellImageInfo>& outCellImages,
+                                     std::vector<std::string>& warnings) {
+    std::string err;
+    zip_t* za = zipio::openReadOnly(xlsxPath, err);
     if (!za) {
-        zip_error_t error;
-        zip_error_init_with_code(&error, errorp);
-        lastError_ = std::string("Failed to open XLSX file as ZIP: ") + zip_error_strerror(&error);
-        zip_error_fini(&error);
+        lastError_ = err;
         return false;
     }
-    
-    // Get number of files in archive
+
+    // Pass 1: relationship documents.
+    std::map<std::string, std::map<std::string, std::string>> drawingRelsMap; // "drawing1" -> rId map
+    std::map<std::string, std::string> cellImagesRelsMap; // WPS cellimages rels
+    std::map<std::string, std::string> drawingToSheet =
+        buildDrawingSheetMap(za, warnings);
+
     zip_int64_t numEntries = zip_get_num_entries(za, 0);
-    
-    // Clear previous cell image mappings
-    cellImageMappings_.clear();
-    
-    // First pass: Parse relationship files to build rId mappings
-    std::map<std::string, std::map<std::string, std::string>> drawingRelsMap;
-    std::map<std::string, std::string> cellImagesRelsMap;  // WPS Excel cellimages.xml relationships
-    
-    for (zip_int64_t i = 0; i < numEntries; i++) {
-        const char* name = zip_get_name(za, i, 0);
-        if (!name) continue;
-        
-        std::string filename(name);
-        
-        // Parse drawing relationship files (for floating images)
-        if (filename.find("xl/drawings/_rels/") == 0 && filename.find(".xml.rels") != std::string::npos) {
+    for (zip_int64_t i = 0; i < numEntries; ++i) {
+        const char* entryName = zip_get_name(za, i, 0);
+        if (!entryName) continue;
+        const std::string filename(entryName);
+
+        if (filename.find("xl/drawings/_rels/") == 0 &&
+            filename.find(".xml.rels") != std::string::npos) {
             std::vector<uint8_t> xmlData;
-            if (readFileFromZip(za, filename, xmlData)) {
-                try {
-                    std::string xmlContent(xmlData.begin(), xmlData.end());
-                    std::map<std::string, std::string> rIdMap = parseRelationships(xmlContent);
-                    
-                    // Extract drawing number (e.g., "drawing1.xml.rels" -> "drawing1")
-                    size_t lastSlash = filename.find_last_of('/');
-                    std::string baseName = (lastSlash != std::string::npos) 
-                        ? filename.substr(lastSlash + 1) 
-                        : filename;
-                    size_t xmlRelsPos = baseName.find(".xml.rels");
-                    if (xmlRelsPos != std::string::npos) {
-                        baseName = baseName.substr(0, xmlRelsPos);
-                    }
-                    
-                    drawingRelsMap[baseName] = rIdMap;
-                } catch (...) {
-                    // Ignore parsing errors
-                }
+            if (zipio::readFile(za, filename, xmlData, kMaxXmlBytes, err)) {
+                const std::string xmlContent(xmlData.begin(), xmlData.end());
+                const size_t lastSlash = filename.find_last_of('/');
+                const std::string baseName = (lastSlash != std::string::npos)
+                    ? filename.substr(lastSlash + 1) : filename;
+                const size_t relsPos = baseName.find(".xml.rels");
+                const std::string drawingBase = (relsPos != std::string::npos)
+                    ? baseName.substr(0, relsPos) : baseName;
+                drawingRelsMap[drawingBase] = xmlp::parseRelationships(xmlContent);
+            } else {
+                warnings.push_back("Failed to read drawing relationships: " + filename +
+                                   " (" + err + ")");
             }
-        }
-        
-        // Parse cellimages relationship file (for WPS Excel embedded images)
-        if (filename == "xl/_rels/cellimages.xml.rels") {
+        } else if (filename == "xl/_rels/cellimages.xml.rels") {
             std::vector<uint8_t> xmlData;
-            if (readFileFromZip(za, filename, xmlData)) {
-                try {
-                    std::string xmlContent(xmlData.begin(), xmlData.end());
-                    cellImagesRelsMap = parseRelationships(xmlContent);
-                } catch (...) {
-                    // Ignore parsing errors
-                }
+            if (zipio::readFile(za, filename, xmlData, kMaxXmlBytes, err)) {
+                const std::string xmlContent(xmlData.begin(), xmlData.end());
+                cellImagesRelsMap = xmlp::parseRelationships(xmlContent);
+            } else {
+                warnings.push_back("Failed to read cellimages relationships: " + err);
             }
         }
     }
-    
-    // Second pass: Extract images and parse drawing XML files
-    for (zip_int64_t i = 0; i < numEntries; i++) {
-        const char* name = zip_get_name(za, i, 0);
-        if (!name) continue;
-        
-        std::string filename(name);
-        
-        // Check if it's in the media directory
+
+    // Pass 2: media, drawing XML, cellimages XML.
+    for (zip_int64_t i = 0; i < numEntries; ++i) {
+        const char* entryName = zip_get_name(za, i, 0);
+        if (!entryName) continue;
+        const std::string filename(entryName);
+
         if (filename.find("xl/media/") == 0) {
             ImageInfo img;
-            
-            if (readFileFromZip(za, filename, img.data)) {
-                // Extract just the filename without path
-                size_t lastSlash = filename.find_last_of('/');
-                img.filename = (lastSlash != std::string::npos) 
-                    ? filename.substr(lastSlash + 1) 
-                    : filename;
-                
-                // Skip invalid images (empty name or empty data)
-                if (img.filename.empty() || img.data.empty()) {
+            if (zipio::readFile(za, filename, img.data, kMaxMediaBytes, err)) {
+                if (img.data.empty()) {
+                    warnings.push_back("Empty media entry skipped: " + filename);
                     continue;
                 }
-                
-                // Determine content type from extension
-                size_t dotPos = img.filename.find_last_of('.');
-                if (dotPos != std::string::npos) {
-                    img.contentType = getContentType(img.filename.substr(dotPos));
-                } else {
-                    img.contentType = "application/octet-stream";
-                }
-                
-                outImages.push_back(img);
+                const size_t lastSlash = filename.find_last_of('/');
+                img.filename = (lastSlash != std::string::npos)
+                    ? filename.substr(lastSlash + 1) : filename;
+                const size_t dotPos = img.filename.find_last_of('.');
+                img.contentType = (dotPos != std::string::npos)
+                    ? getContentType(img.filename.substr(dotPos))
+                    : "application/octet-stream";
+                outImages.push_back(std::move(img));
+            } else {
+                warnings.push_back("Failed to read media entry '" + filename +
+                                   "': " + err);
             }
+            continue;
         }
-        
-        // Parse drawing XML files for image positions
-        if (filename.find("xl/drawings/drawing") == 0 && 
+
+        if (filename.find("xl/drawings/drawing") == 0 &&
             filename.find(".xml") != std::string::npos &&
             filename.find(".rels") == std::string::npos) {
             std::vector<uint8_t> xmlData;
-            if (readFileFromZip(za, filename, xmlData)) {
-                try {
-                    std::string xmlContent(xmlData.begin(), xmlData.end());
-                    
-                    // Extract drawing number
-                    size_t lastSlash = filename.find_last_of('/');
-                    std::string baseName = (lastSlash != std::string::npos) 
-                        ? filename.substr(lastSlash + 1) 
-                        : filename;
-                    size_t xmlPos = baseName.find(".xml");
-                    if (xmlPos != std::string::npos) {
-                        baseName = baseName.substr(0, xmlPos);
-                    }
-                    
-                    // Get corresponding rId mapping
-                    std::map<std::string, std::string> rIdMap;
-                    auto it = drawingRelsMap.find(baseName);
-                    if (it != drawingRelsMap.end()) {
-                        rIdMap = it->second;
-                    }
-                    
-                    // Extract sheet name from filename (simplified)
-                    std::string sheetName = "Sheet1"; // Default, should be mapped from relationships
-                    
-                    parseDrawingXml(xmlContent, sheetName, rIdMap, outAnchors);
-                } catch (...) {
-                    // Ignore XML parsing errors
-                }
+            if (!zipio::readFile(za, filename, xmlData, kMaxXmlBytes, err)) {
+                warnings.push_back("Failed to read drawing XML: " + filename + " (" + err + ")");
+                continue;
             }
+            const std::string xmlContent(xmlData.begin(), xmlData.end());
+            const size_t lastSlash = filename.find_last_of('/');
+            const std::string baseName = (lastSlash != std::string::npos)
+                ? filename.substr(lastSlash + 1) : filename;
+            const size_t xmlPos = baseName.find(".xml");
+            const std::string drawingBase = (xmlPos != std::string::npos)
+                ? baseName.substr(0, xmlPos) : baseName;
+
+            std::map<std::string, std::string> rIdMap;
+            auto relsIt = drawingRelsMap.find(drawingBase);
+            if (relsIt != drawingRelsMap.end()) {
+                rIdMap = relsIt->second;
+            } else {
+                warnings.push_back("No relationships found for drawing '" +
+                                   drawingBase + "'; image refs may not resolve");
+            }
+
+            std::string sheetName;
+            auto sheetIt = drawingToSheet.find(drawingBase);
+            if (sheetIt != drawingToSheet.end()) {
+                sheetName = sheetIt->second;
+            } else {
+                warnings.push_back("Drawing '" + drawingBase +
+                                   "' not mapped to any sheet; anchors left unattached");
+            }
+
+            parseDrawingXml(xmlContent, sheetName, rIdMap, outAnchors, warnings);
+            continue;
         }
-        
-        // Parse cellimages.xml for WPS Excel embedded images
+
         if (filename == "xl/cellimages.xml") {
             std::vector<uint8_t> xmlData;
-            if (readFileFromZip(za, filename, xmlData)) {
-                try {
-                    std::string xmlContent(xmlData.begin(), xmlData.end());
-                    
-                    // Use the dedicated cellimages.xml.rels mapping (WPS Excel)
-                    parseCellImagesXml(xmlContent, cellImagesRelsMap, cellImageMappings_);
-                } catch (...) {
-                    // Ignore XML parsing errors
-                }
+            if (zipio::readFile(za, filename, xmlData, kMaxXmlBytes, err)) {
+                const std::string xmlContent(xmlData.begin(), xmlData.end());
+                parseCellImagesXml(xmlContent, cellImagesRelsMap, outCellImages, warnings);
+            } else {
+                warnings.push_back("Failed to read cellimages.xml: " + err);
             }
         }
     }
-    
-    zip_close(za);
+
+    zipio::close(za);
     return true;
 }
 
 } // namespace baja_xlsx
-
-

@@ -5,7 +5,9 @@
       "sources": [
         "src/addon.cpp",
         "src/xlsx_reader.cpp",
-        "src/image_extractor.cpp"
+        "src/image_extractor.cpp",
+        "src/zip_reader.cpp",
+        "src/xml_parsers.cpp"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
@@ -33,11 +35,11 @@
               }
             },
             "include_dirs": [
-              "<!(echo %VCPKG_ROOT%)/installed/x64-windows/include"
+              "<!(node scripts/require-vcpkg-root.js)/installed/x64-windows/include"
             ],
             "libraries": [
-              "<!(echo %VCPKG_ROOT%)/installed/x64-windows/lib/xlnt.lib",
-              "<!(echo %VCPKG_ROOT%)/installed/x64-windows/lib/zip.lib"
+              "<!(node scripts/require-vcpkg-root.js)/installed/x64-windows/lib/xlnt.lib",
+              "<!(node scripts/require-vcpkg-root.js)/installed/x64-windows/lib/zip.lib"
             ]
           }
         ],
@@ -49,9 +51,10 @@
               "-fexceptions"
             ],
             "include_dirs": [
-              "/usr/local/include"
+              "<!(node scripts/require-vcpkg-root.js)/installed/x64-linux/include"
             ],
             "libraries": [
+              "-L<!(node scripts/require-vcpkg-root.js)/installed/x64-linux/lib",
               "-lxlnt",
               "-lzip"
             ]
@@ -67,9 +70,10 @@
               "OTHER_CPLUSPLUSFLAGS": ["-std=c++17"]
             },
             "include_dirs": [
-              "/usr/local/include"
+              "<!(node scripts/require-vcpkg-root.js)/installed/arm64-osx/include"
             ],
             "libraries": [
+              "-L<!(node scripts/require-vcpkg-root.js)/installed/arm64-osx/lib",
               "-lxlnt",
               "-lzip"
             ]
@@ -79,4 +83,3 @@
     }
   ]
 }
-

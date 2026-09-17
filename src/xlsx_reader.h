@@ -3,7 +3,6 @@
 
 #include <string>
 #include <vector>
-#include <map>
 #include <xlnt/xlnt.hpp>
 
 namespace baja_xlsx {
@@ -29,55 +28,54 @@ struct CellImageMapping {
     std::string imageName;    // e.g., "image1.png"
 };
 
+// A single cell: plain text plus optional attached image indices.
+// Image attachment (business logic) is resolved here in C++ so that the
+// N-API boundary layer only converts values (AUDIT-20260917-034).
+struct CellValue {
+    std::string text;
+    std::vector<int> imageIndices; // indices into ExcelData::images
+};
+
 struct SheetData {
     std::string name;
-    std::vector<std::vector<std::string>> data;
+    std::vector<std::vector<CellValue>> data;
 };
 
 struct ExcelData {
     std::vector<SheetData> sheets;
     std::vector<ImageData> images;
     std::vector<ImagePosition> imagePositions;
-    std::vector<CellImageMapping> cellImageMappings;  // WPS Excel support
+    std::vector<CellImageMapping> cellImageMappings;
+    // Non-fatal diagnostics (skipped entries, unmapped drawings, ...).
+    std::vector<std::string> warnings;
 };
 
 class XlsxReader {
 public:
     XlsxReader();
-    ~XlsxReader();
-    
-    // Load Excel file
-    bool load(const std::string& filepath);
-    
-    // Read all sheet data
-    std::vector<SheetData> readSheetData();
-    
-    // Extract all images from the workbook
-    std::vector<ImageData> extractImages();
-    
-    // Get image positions in worksheets
-    std::vector<ImagePosition> getImagePositions();
-    
-    // Read complete Excel data (sheets + images + positions)
-    ExcelData readExcel(const std::string& filepath);
-    
-    // Get last error message
+
+    // Reads complete Excel data (sheets + images + attachments).
+    // maxRows / maxCols: optional caps on rows/columns read per sheet
+    // (0 = no explicit cap beyond the Excel format maximum).
+    // Failures are reported via lastError_ as "CODE|message".
+    ExcelData readExcel(const std::string& filepath,
+                        size_t maxRows = 0,
+                        size_t maxCols = 0);
+
+    // Last error in "CODE|message" form; empty when no error occurred.
     std::string getLastError() const { return lastError_; }
 
 private:
+    bool load(const std::string& filepath);
+    std::vector<SheetData> readSheetData(size_t maxRows, size_t maxCols);
+    std::string cellToString(const xlnt::cell& cell);
+
     xlnt::workbook workbook_;
     std::string lastError_;
     bool loaded_;
-    
-    // Helper function to convert cell value to string
-    std::string cellToString(const xlnt::cell& cell);
-    
-    // Helper function to determine image type from extension
-    std::string getImageType(const std::string& filename);
+    std::vector<std::string> warnings_;
 };
 
 } // namespace baja_xlsx
 
 #endif // XLSX_READER_H
-
-
