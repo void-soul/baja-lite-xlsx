@@ -1,9 +1,10 @@
 #include <napi.h>
 #include "xlsx_reader.h"
 
-#include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <map>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -586,8 +587,12 @@ public:
     void Execute() override {
         RowBatchSink sink = [this](std::vector<std::vector<CellValue>>&& batch) -> bool {
             rowCount_ += batch.size();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                batchDelivered_ = false;
+            }
+
             auto* payload = new BatchPayload{std::move(batch), this};
-            pending_.fetch_add(1);
             const napi_status status = tsf_.BlockingCall(
                 payload,
                 [](Napi::Env env, Napi::Function cb, void* ctx) {
@@ -596,14 +601,20 @@ public:
                     Array rows = rowsToJsArray(env, item->rows, worker->data_.images);
                     delete item;
                     cb.Call({ rows });
-                    worker->afterBatch();
+                    worker->markBatchDelivered(env.IsExceptionPending());
                 });
             if (status != napi_ok) {
                 delete payload;
-                pending_.fetch_sub(1);
                 return false;
             }
-            return true;
+
+            // Wait for the main thread to run the callback before producing the
+            // next batch: it keeps queueing bounded (backpressure) and
+            // guarantees that no callback can fire after Execute returns --
+            // AsyncWorker is destroyed right after OnOK/OnError.
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [this] { return batchDelivered_; });
+            return !stopRequested_;
         };
 
         XlsxReader reader;
@@ -617,46 +628,32 @@ public:
         }
     }
 
-    // Queued batches are delivered by the event loop, which can happen after
-    // the worker completed. Resolving only once the queue has drained keeps
-    // the promise contract: every batch has run before the caller resumes.
-    void afterBatch() {
-        if (pending_.fetch_sub(1) == 1 && finished_) {
-            finish();
+    void markBatchDelivered(bool stopRequested) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            batchDelivered_ = true;
+            if (stopRequested) {
+                stopRequested_ = true;
+            }
         }
+        cv_.notify_one();
     }
 
     void OnOK() override {
-        finished_ = true;
-        if (pending_.load() == 0) {
-            finish();
-        }
+        Napi::Env env = Env();
+        tsf_.Release();
+        deferred_.Resolve(makeStreamResult(env, rowCount_, data_.warnings));
     }
 
     void OnError(const Napi::Error& e) override {
-        errorMessage_ = e.Message();
-        finished_ = true;
-        if (pending_.load() == 0) {
-            finish();
-        }
+        Napi::Env env = Env();
+        tsf_.Release();
+        deferred_.Reject(makeCodedError(env, e.Message()).Value());
     }
 
     ExcelData data_; // images must stay alive while batches are converted
 
 private:
-    void finish() {
-        if (resolved_) return;
-        resolved_ = true;
-
-        Napi::Env env = Env();
-        tsf_.Release();
-        if (!errorMessage_.empty()) {
-            deferred_.Reject(makeCodedError(env, errorMessage_).Value());
-            return;
-        }
-        deferred_.Resolve(makeStreamResult(env, rowCount_, data_.warnings));
-    }
-
     Napi::Promise::Deferred deferred_;
     Napi::ThreadSafeFunction tsf_;
     std::string filepath_;
@@ -665,10 +662,10 @@ private:
     ReadOptions options_;
     size_t batchSize_;
     size_t rowCount_ = 0;
-    std::atomic<size_t> pending_{0};
-    bool finished_ = false;
-    bool resolved_ = false;
-    std::string errorMessage_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool batchDelivered_ = false;
+    bool stopRequested_ = false;
 };
 
 Value ReadExcelBatchedAsync(const CallbackInfo& info) {
