@@ -69,5 +69,7 @@ jobs:
         run: npm run build
       - name: Copy runtime DLLs
         run: node scripts/package-dlls.js
+      - name: Verify addon loads (reports missing DLLs)
+        run: node -e "require('./build/Release/baja_xlsx.node'); console.log('addon loads OK')"
       - name: Test
         run: npm test

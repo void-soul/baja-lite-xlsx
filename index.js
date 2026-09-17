@@ -8,19 +8,30 @@ const crypto = require('crypto');
 // ---------------------------------------------------------------------------
 
 function loadAddon() {
+  let releaseErr = null;
   try {
     return require('./build/Release/baja_xlsx.node');
   } catch (err) {
-    try {
-      return require('./build/Debug/baja_xlsx.node');
-    } catch (err2) {
-      const e = new Error(
-        'Native addon not found. Please run "npm install" or "npm run build" first.\n' +
-        'Make sure you have installed xlnt + libzip via vcpkg (VCPKG_ROOT) or the system package manager.'
-      );
-      e.code = 'ADDON_NOT_FOUND';
-      throw e;
-    }
+    releaseErr = err;
+  }
+  try {
+    return require('./build/Debug/baja_xlsx.node');
+  } catch (debugErr) {
+    // Surface the ORIGINAL load error (e.g. missing DLL name from Windows)
+    // instead of hiding it behind a generic message.
+    const detail = [releaseErr, debugErr]
+      .filter(Boolean)
+      .map((e) => (e && e.message) || String(e))
+      .join(' | ');
+    const e = new Error(
+      'Native addon failed to load. Original errors: ' + detail + '\n' +
+      'Hints: file missing -> run "npm install" or "npm run build"; ' +
+      'module/DLL missing -> copy the required vcpkg DLLs next to baja_xlsx.node ' +
+      '(see scripts/package-dlls.js) or install the VC++ Redistributable.'
+    );
+    e.code = 'ADDON_LOAD_FAILED';
+    e.cause = releaseErr;
+    throw e;
   }
 }
 
