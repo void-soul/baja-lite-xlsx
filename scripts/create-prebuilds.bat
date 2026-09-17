@@ -1,17 +1,15 @@
 @echo off
-chcp 65001 > nul
+setlocal
 echo ============================================
-echo 创建预编译包（包含 DLL）
+echo Creating prebuild archives (DLLs bundled)
 echo ============================================
 echo.
 
-REM 检查 vcpkg 路径
-if exist "E:\vcpkg\vcpkg.exe" (
-    set VCPKG_ROOT=E:\vcpkg
-) else if exist "C:\vcpkg\vcpkg.exe" (
-    set VCPKG_ROOT=C:\vcpkg
-) else (
-    echo [✗] 未找到 vcpkg
+if not defined VCPKG_ROOT (
+    if exist "C:\vcpkg\vcpkg.exe" set VCPKG_ROOT=C:\vcpkg
+)
+if not defined VCPKG_ROOT (
+    echo [x] VCPKG_ROOT is not set and no vcpkg found at C:\vcpkg
     pause
     exit /b 1
 )
@@ -19,76 +17,66 @@ if exist "E:\vcpkg\vcpkg.exe" (
 echo VCPKG_ROOT=%VCPKG_ROOT%
 echo.
 
-REM 回到项目目录
-cd /d %~dp0\..
+cd /d "%~dp0.."
 
-echo [1/5] 清理旧的构建和预编译包...
+echo [1/5] Removing previous build and prebuild archives...
 if exist build (
     rmdir /s /q build
-    echo ✓ 已删除 build 目录
+    echo   - removed build\
 )
 if exist prebuilds (
     rmdir /s /q prebuilds
-    echo ✓ 已删除 prebuilds 目录
+    echo   - removed prebuilds\
 )
 echo.
 
-echo [2/5] 重新编译原生模块...
+echo [2/5] Building the native addon...
 call npm run build
 if %errorlevel% neq 0 (
-    echo [✗] 编译失败
+    echo [x] Build failed
     pause
     exit /b 1
 )
-echo ✓ 编译成功
+echo   - build succeeded
 echo.
 
-echo [3/5] 复制 DLL 文件到 build/Release...
+echo [3/5] Copying runtime DLLs into build\Release...
 call npm run copy-dlls
 echo.
 
-echo [4/5] 创建预编译包（不含 DLL）...
-echo.
-
-echo 📦 创建 N-API v8 预编译包...
-call npx prebuild --runtime napi --target 8 --strip
+echo [4/5] Creating prebuild archives...
+call npm run prebuild:napi
 if %errorlevel% neq 0 (
-    echo [✗] N-API 预编译包创建失败
+    echo [x] N-API prebuild failed
+    pause
+    exit /b 1
+)
+call npm run prebuild:electron
+if %errorlevel% neq 0 (
+    echo [x] Electron prebuild failed
     pause
     exit /b 1
 )
 echo.
 
-echo 📦 创建 Electron v34 预编译包...
-call npx prebuild --runtime electron --target 34.0.0 --strip
-if %errorlevel% neq 0 (
-    echo [✗] Electron 预编译包创建失败
-    pause
-    exit /b 1
-)
-echo.
-
-echo [5/5] 将 DLL 打包到预编译包中...
+echo [5/5] Packing DLLs into the archives...
 call npm run prebuild:pack-dlls
 if %errorlevel% neq 0 (
-    echo [✗] DLL 打包失败
+    echo [x] DLL packing failed
     pause
     exit /b 1
 )
 echo.
 
 echo ============================================
-echo [✅] 预编译包创建成功！
+echo [ok] Prebuild archives created
 echo ============================================
 echo.
-
-echo 预编译包位置: prebuilds\
+echo Location: prebuilds\
 dir /b prebuilds
 echo.
-
-echo 接下来可以:
-echo   1. 测试预编译包: npm run test:prebuild
-echo   2. 发布到 GitHub: git tag v1.0.13 ^&^& git push --tags
+echo Next steps:
+echo   1. Verify the archives: npm run verify:prebuild
+echo   2. Publish a release:   git tag v1.0.16 ^&^& git push origin v1.0.16
 echo.
 pause
-

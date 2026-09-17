@@ -1,73 +1,73 @@
 @echo off
+setlocal
 echo ======================================
-echo 检查 vcpkg 依赖
+echo Checking vcpkg dependencies
 echo ======================================
 echo.
 
-set VCPKG_ROOT=E:\vcpkg
+if not defined VCPKG_ROOT (
+    if exist "C:\vcpkg\vcpkg.exe" set VCPKG_ROOT=C:\vcpkg
+)
+if not defined VCPKG_ROOT (
+    echo [x] VCPKG_ROOT is not set and no vcpkg found at C:\vcpkg
+    echo     Set it first, e.g.:  set VCPKG_ROOT=C:\vcpkg
+    pause
+    exit /b 1
+)
+
 echo VCPKG_ROOT=%VCPKG_ROOT%
 echo.
 
-echo 检查 vcpkg 是否存在...
+echo Checking vcpkg installation...
 if exist "%VCPKG_ROOT%\vcpkg.exe" (
-    echo ✓ vcpkg.exe 存在
+    echo [ok] vcpkg.exe found
 ) else (
-    echo ✗ vcpkg.exe 不存在于 %VCPKG_ROOT%
-    echo 请确认 vcpkg 路径是否正确
+    echo [x] vcpkg.exe NOT found in %VCPKG_ROOT%
     pause
     exit /b 1
 )
 echo.
 
-echo 检查已安装的包...
+echo Installed packages:
 call "%VCPKG_ROOT%\vcpkg.exe" list
 echo.
 
 echo ======================================
-echo 检查必需的头文件和库...
+echo Checking required headers and libraries
 echo ======================================
 
 set VCPKG_INSTALLED=%VCPKG_ROOT%\installed\x64-windows
 
-echo.
-echo 检查 xlnt...
+echo xlnt:
 if exist "%VCPKG_INSTALLED%\include\xlnt\xlnt.hpp" (
-    echo ✓ xlnt 头文件存在
+    echo   [ok] header found
 ) else (
-    echo ✗ xlnt 头文件不存在
-    echo 路径: %VCPKG_INSTALLED%\include\xlnt\xlnt.hpp
+    echo   [x]  header missing: %VCPKG_INSTALLED%\include\xlnt\xlnt.hpp
 )
-
 if exist "%VCPKG_INSTALLED%\lib\xlnt.lib" (
-    echo ✓ xlnt 库文件存在
+    echo   [ok] library found
 ) else (
-    echo ✗ xlnt 库文件不存在
+    echo   [x]  library missing
 )
 
-echo.
-echo 检查 libzip...
+echo libzip:
 if exist "%VCPKG_INSTALLED%\include\zip.h" (
-    echo ✓ libzip 头文件存在
+    echo   [ok] header found
 ) else (
-    echo ✗ libzip 头文件不存在
+    echo   [x]  header missing
 )
-
 if exist "%VCPKG_INSTALLED%\lib\zip.lib" (
-    echo ✓ libzip 库文件存在
+    echo   [ok] library found
 ) else (
-    echo ✗ libzip 库文件不存在
+    echo   [x]  library missing
 )
 
 echo.
 echo ======================================
-echo 如果缺少依赖，请运行：
-echo   cd %VCPKG_ROOT%
+echo If anything is missing, run:
+echo   cd /d "%VCPKG_ROOT%"
 echo   vcpkg install xlnt:x64-windows
 echo   vcpkg install libzip:x64-windows
-echo   vcpkg install zlib:x64-windows
-echo   vcpkg install bzip2:x64-windows
-echo   vcpkg install fmt:x64-windows
 echo ======================================
 
 pause
-

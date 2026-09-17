@@ -1,5 +1,16 @@
 name: Prebuild Native Module
 
+# Builds the N-API prebuilt binaries for every supported platform, attaches
+# them to the GitHub Release and publishes the package to npm.
+#
+# Why no per-Node/per-Electron-version jobs: the addon is built as N-API v8
+# (ABI-stable), so ONE binary per platform+arch serves every Node.js >= 16
+# and every Electron version, including future ones.
+#
+# Platform coverage: Windows x64, Linux x64 (+ arm64), macOS arm64 (+ x64).
+# The two "experimental" entries use newer runner labels; they are allowed to
+# fail without blocking the release.
+
 on:
   push:
     tags:
@@ -8,173 +19,109 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
-  build-windows:
-    name: Build Windows x64 - Node 20 + Electron 34
-    # windows-2022 ships VS 2022, which node-gyp 10.x recognizes.
-    runs-on: windows-2022
-    
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: win32-x64
+            os: windows-2022
+          - name: linux-x64
+            os: ubuntu-latest
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            experimental: true
+          - name: darwin-arm64
+            os: macos-latest
+          - name: darwin-x64
+            os: macos-13
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-      
+
       - name: Cache vcpkg
         uses: actions/cache@v4
         with:
           path: |
-            C:\vcpkg-ci
+            .vcpkg
             vcpkg-bincache
-          key: vcpkg-master-xlnt-libzip-x64-windows
+          key: vcpkg-master-${{ matrix.name }}
 
-      - name: Set up vcpkg
-        shell: pwsh
-        run: |
-          if (-not (Test-Path C:\vcpkg-ci\.git)) {
-            git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg-ci
-          }
-          & C:\vcpkg-ci\bootstrap-vcpkg.bat -disableMetrics
-          "VCPKG_ROOT=C:\vcpkg-ci" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Setup vcpkg (xlnt + libzip)
+        uses: ./.github/actions/setup-vcpkg
 
-      - name: Install vcpkg dependencies
-        shell: pwsh
-        run: |
-          $env:VCPKG_DEFAULT_BINARY_CACHE = "$env:GITHUB_WORKSPACE\vcpkg-bincache"
-          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-          & "$env:VCPKG_ROOT\vcpkg.exe" install xlnt:x64-windows libzip:x64-windows --recurse
-
-      - name: Verify vcpkg installation
-        shell: pwsh
-        run: |
-          $root = $env:VCPKG_ROOT
-          Write-Host "VCPKG_ROOT: $root"
-          Write-Host ""
-          Write-Host "Checking xlnt installation..."
-          if (Test-Path "$root/installed/x64-windows/include/xlnt/xlnt.hpp") {
-            Write-Host "[OK] xlnt.hpp found"
-          } else {
-            Write-Host "[ERROR] xlnt.hpp NOT found"
-            exit 1
-          }
-          if (Test-Path "$root/installed/x64-windows/lib/xlnt.lib") {
-            Write-Host "[OK] xlnt.lib found"
-          } else {
-            Write-Host "[ERROR] xlnt.lib NOT found"
-            exit 1
-          }
-          Write-Host ""
-          Write-Host "Checking libzip installation..."
-          if (Test-Path "$root/installed/x64-windows/include/zip.h") {
-            Write-Host "[OK] zip.h found"
-          } else {
-            Write-Host "[ERROR] zip.h NOT found"
-            exit 1
-          }
-          if (Test-Path "$root/installed/x64-windows/lib/zip.lib") {
-            Write-Host "[OK] zip.lib found"
-          } else {
-            Write-Host "[ERROR] zip.lib NOT found"
-            exit 1
-          }
-          Write-Host ""
-          Write-Host "[SUCCESS] All dependencies verified!"
+      - name: Remove stale prebuild archives
+        shell: bash
+        run: rm -rf prebuilds
 
       - name: Install npm dependencies
         run: npm install --ignore-scripts
 
-      - name: Create prebuild package for Node.js
-        run: npx prebuild --runtime napi --target 8 --strip
+      - name: Create prebuild packages (napi + electron, Windows DLLs bundled)
+        run: npm run prebuilds
 
-      - name: Create prebuild package for Electron 34
-        run: npx prebuild --runtime electron --target 34.0.0 --strip
-
-      - name: Pack DLLs into prebuild packages
-        run: node scripts/pack-dlls-into-prebuild.js
-
-      - name: Ensure a loadable Release build exists for tests
-        shell: pwsh
+      - name: Ensure a Release build exists for the tests
+        shell: bash
         run: |
-          if (-not (Test-Path build\Release\baja_xlsx.node)) {
-            Write-Host 'prebuild consumed the build output; rebuilding Release for tests'
+          set -e
+          if [ ! -f build/Release/baja_xlsx.node ]; then
             npm run build
-            node scripts/package-dlls.js
-          }
+            node scripts/package-dlls.js || true
+          fi
 
-      - name: Verify addon loads (reports missing DLLs)
+      - name: Verify the addon loads
         run: node -e "require('./build/Release/baja_xlsx.node'); console.log('addon loads OK')"
 
       - name: Run tests
         run: npm test
 
-      - name: Generate checksums
-        run: npm run checksums
+      - name: Verify prebuild archives
+        run: node scripts/verify-prebuild.js prebuilds
 
       - name: List generated files
-        run: |
-          Write-Host "Generated prebuild packages:"
-          Get-ChildItem prebuilds -Recurse -File | Select-Object Name, @{Name="Size(KB)";Expression={[math]::Round($_.Length/1KB, 1)}}
-        shell: powershell
-      
-      - name: Verify package contents
-        shell: pwsh
-        run: |
-          $tarFiles = Get-ChildItem prebuilds -Filter *.tar.gz
-          if ($tarFiles.Count -eq 0) {
-            Write-Error 'No .tar.gz prebuild archives were produced'
-            exit 1
-          }
-          $firstFile = $tarFiles[0]
-          Write-Host "Extracting $($firstFile.Name) to verify contents..."
-          $extractPath = 'temp_verify'
-          New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-          tar -xzf $firstFile.FullName -C $extractPath
-          Write-Host 'Package contents:'
-          Get-ChildItem $extractPath -Recurse -File |
-            Select-Object FullName, @{Name = 'SizeKB'; Expression = { [math]::Round($_.Length / 1KB, 1) } } |
-            Format-Table -AutoSize
+        shell: bash
+        run: ls -la prebuilds/
 
-          $nodeFiles = Get-ChildItem $extractPath -Recurse -Filter *.node
-          $dllFiles = Get-ChildItem $extractPath -Recurse -Filter *.dll
-          Write-Host "Found $($nodeFiles.Count) native module(s) and $($dllFiles.Count) DLL file(s):"
-          $dllFiles | Select-Object -ExpandProperty Name
-
-          if ($nodeFiles.Count -eq 0) { Write-Error 'Prebuild archive does not contain a .node file'; exit 1 }
-          if ($dllFiles.Count -eq 0) { Write-Error 'Prebuild archive does not contain the runtime DLLs'; exit 1 }
-          Remove-Item $extractPath -Recurse -Force
-      
-      - name: Upload artifacts
+      - name: Upload prebuild archives
         uses: actions/upload-artifact@v4
         with:
-          name: prebuilds-windows-x64
-          path: prebuilds/
+          name: prebuilds-${{ matrix.name }}
+          path: prebuilds/*.tar.gz
+          if-no-files-found: error
 
   release:
     name: Create Release
-    needs: [build-windows]
+    needs: [build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Download prebuild artifacts
+
+      - name: Download all prebuild artifacts
         uses: actions/download-artifact@v4
         with:
-          name: prebuilds-windows-x64
+          pattern: prebuilds-*
+          merge-multiple: true
           path: prebuilds
-      
+
       - name: List files to be released
-        run: |
-          echo "Files to be released:"
-          ls -lah prebuilds/
-      
+        run: ls -la prebuilds/
+
+      - name: Generate checksums
+        run: node scripts/generate-checksums.js
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -185,126 +132,6 @@ jobs:
             prebuilds/checksums.txt
           draft: false
           prerelease: false
-          body: |
-            ## 📦 预编译包说明
-            
-            此版本包含 **Windows x64** 平台的预编译包，适用于 **Node.js 20+** 和 **Electron 34+**。
-            
-            ### ✅ 支持的平台（预编译包）
-            
-            | 平台 | 架构 | 运行时 | 版本 | 安装方式 |
-            |------|------|--------|------|----------|
-            | **Windows** | x64 | **Node.js** | **20+** | 🚀 **自动下载预编译包** |
-            | **Windows** | x64 | **Electron** | **34+** | 🚀 **自动下载预编译包** |
-            
-            ### 🔧 其他平台/版本（源码编译）
-            
-            | 平台 | Node.js 版本 | 安装方式 |
-            |------|--------------|----------|
-            | Windows | 16, 18 | ⚙️ 自动源码编译 |
-            | Linux | 16, 18, 20+ | ⚙️ 自动源码编译 |
-            | macOS | 16, 18, 20+ | ⚙️ 自动源码编译 |
-            
-            ---
-            
-            ## 📥 安装
-            
-            ### Windows + Node 20 用户（推荐）
-            
-            ```bash
-            npm install baja-lite-xlsx
-            ```
-            
-            ✅ **无需任何编译环境**，自动下载预编译包，即装即用！
-            
-            ### 其他环境
-            
-            ```bash
-            npm install baja-lite-xlsx
-            ```
-            
-            ⚙️ **需要编译环境**（安装时自动编译）
-            
-            #### Windows（Node 16/18）编译要求
-            
-            ```bash
-            # 需要安装：
-            # 1. Visual Studio 2019+ 或 Build Tools for Visual Studio
-            # 2. vcpkg
-            # 3. xlnt (通过 vcpkg install xlnt:x64-windows)
-            ```
-            
-            #### Linux 编译要求
-            
-            **Ubuntu/Debian:**
-            ```bash
-            sudo apt-get install -y build-essential cmake git
-            ```
-            
-            **CentOS/RHEL:**
-            ```bash
-            sudo yum groupinstall "Development Tools"
-            sudo yum install cmake git
-            ```
-            
-            #### macOS 编译要求
-            
-            ```bash
-            xcode-select --install
-            ```
-            
-            ---
-            
-            ## 🎯 预编译包详情
-            
-            **包含的文件：**
-            - `napi-v8-win32-x64.tar.gz` - Windows x64, Node.js 20+
-            - `electron-v34.0-win32-x64.tar.gz` - Windows x64, Electron 34+
-            
-            **自动匹配：**
-            - ✅ Windows 10/11 x64
-            - ✅ Windows Server 2019+ x64
-            - ✅ Node.js 20.x
-            - ✅ Electron 34.x
-            
-            **不匹配时自动回退到源码编译**
-            
-            ---
-            
-            ## 📚 文档与示例
-            
-            - [📖 完整文档](https://github.com/void-soul/baja-lite-xlsx#readme)
-            - [🚀 快速开始](https://github.com/void-soul/baja-lite-xlsx/blob/master/QUICKSTART.md)
-            - [💻 示例代码](https://github.com/void-soul/baja-lite-xlsx/tree/master/examples)
-            - [🔧 API 文档](https://github.com/void-soul/baja-lite-xlsx/blob/master/API_USAGE_CN.md)
-            
-            ## 🐛 问题反馈
-            
-            遇到问题？请提交 [Issue](https://github.com/void-soul/baja-lite-xlsx/issues)
-            
-            ---
-            
-            ## 📊 技术细节
-            
-            **预编译包信息：**
-            - 大小: ~500KB - 1MB（压缩后，每个包）
-            - Runtime: N-API v8 / Electron v34
-            - 架构: x64
-            - 优化: Release + Strip
-            - 依赖: xlnt, libzip, zlib
-            
-            **兼容性：**
-            - ✅ N-API v8 (Node.js >= 20)
-            - ✅ Electron ABI v34 (Electron >= 34)
-            - ✅ Windows SDK 10.0+
-            - ✅ MSVC 2019+
-            
-            **功能特性：**
-            - ✅ 读取 Excel 数据
-            - ✅ 提取图片
-            - ✅ 支持多 Sheet
-            - ✅ 支持 Buffer/base64 输入
-            - ✅ TypeScript 类型支持
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -1,110 +1,91 @@
 /**
- * 嵌入式图片处理示例
- * 演示如何处理Excel中的嵌入式图片（=DISPIMG公式）
+ * Embedded image example.
+ * Shows how embedded images (=DISPIMG formulas) are returned.
  */
 
 const { readTableAsJSON } = require('../index');
 const fs = require('fs');
 const path = require('path');
 
-console.log('=== 嵌入式图片处理示例 ===\n');
+console.log('=== Embedded images example ===\n');
 
-// 使用示例文件
 const excelFile = path.join(__dirname, 'sample.xlsx');
 
-// 检查文件是否存在
 if (!fs.existsSync(excelFile)) {
-  console.log('⚠️  测试文件不存在:', excelFile);
+  console.log('Fixture not found:', excelFile);
   console.log('');
-  console.log('使用说明：');
-  console.log('1. 准备一个Excel文件，包含员工信息和照片');
-  console.log('2. 在Excel中，可以使用两种方式插入图片：');
-  console.log('   - 浮动图片：直接拖拽图片到单元格附近');
-  console.log('   - 嵌入式图片：使用"插入 > 图片 > 此设备"，选择"嵌入单元格"');
-  console.log('3. 嵌入式图片在Excel中会显示为公式：=DISPIMG("ID_...", 1)');
-  console.log('4. 本库会自动识别并转换两种类型的图片为统一格式');
+  console.log('How to try this example:');
+  console.log('1. Prepare an .xlsx with e.g. employee data and photos.');
+  console.log('2. Insert pictures in either of these ways:');
+  console.log('   - floating image: drag the image near a cell');
+  console.log('   - embedded image: Insert > Pictures > This Device, then "Place in Cell"');
+  console.log('3. Embedded pictures appear as formulas in Excel: =DISPIMG("ID_...", 1)');
+  console.log('4. This library converts both kinds into the same object shape.');
   console.log('');
-  console.log('Excel 示例结构：');
-  console.log('┌────────┬──────┬─────────┬────────┐');
-  console.log('│ 名称   │ 年龄 │ photo1  │ 备注   │');
-  console.log('├────────┼──────┼─────────┼────────┤');
-  console.log('│ 张三   │ 25   │ [图片]  │ 员工   │  <- 嵌入式图片');
-  console.log('│ 李四   │ 30   │ [图片]  │ 经理   │  <- 浮动图片');
-  console.log('│ 王五   │ 28   │         │ 员工   │  <- 无图片');
-  console.log('└────────┴──────┴─────────┴────────┘');
+  console.log('Expected sheet layout:');
+  console.log('+--------+------+---------+--------+');
+  console.log('| name   | age  | photo1  | note   |');
+  console.log('+--------+------+---------+--------+');
+  console.log('| Alice  | 25   | [image] | staff  |  <- embedded image');
+  console.log('| Bob    | 30   | [image] | manager|  <- floating image');
+  console.log('| Carol  | 28   |         | staff  |  <- no image');
+  console.log('+--------+------+---------+--------+');
   process.exit(0);
 }
 
 try {
-  // 读取Excel数据
   const data = readTableAsJSON(excelFile, {
     headerRow: 0,
     headerMap: {
       '名称': 'name',
       '年龄': 'age'
-      // photo1 保持原名
+      // photo1 keeps its original header
     }
   });
-  
-  console.log(`读取到 ${data.length} 行数据\n`);
-  
-  // 处理每一行数据
+
+  console.log(`Read ${data.length} row(s)\n`);
+
   data.forEach((row, index) => {
-    console.log(`【行 ${index + 1}】`);
-    console.log(`  姓名: ${row.name || '(空)'}`);
-    console.log(`  年龄: ${row.age || '(空)'}`);
-    
-    // 检查是否有图片
-    if (row.photo1) {
-      if (typeof row.photo1 === 'object' && row.photo1.data) {
-        // 图片已正确转换为对象
-        console.log(`  照片: ✓ 已识别`);
-        console.log(`    - 文件名: ${row.photo1.name}`);
-        console.log(`    - 类型: ${row.photo1.type}`);
-        console.log(`    - 大小: ${row.photo1.data.length} bytes`);
-        
-        // 保存图片到文件
-        const outputDir = path.join(__dirname, 'output', 'embedded-photos');
-        if (!fs.existsSync(outputDir)) {
-          fs.mkdirSync(outputDir, { recursive: true });
-        }
-        
-        const filename = `${row.name || 'row' + (index + 1)}_${row.photo1.name}`;
-        const outputPath = path.join(outputDir, filename);
-        fs.writeFileSync(outputPath, row.photo1.data);
-        console.log(`    - 已保存: ${filename}`);
-      } else if (typeof row.photo1 === 'string' && row.photo1.includes('DISPIMG')) {
-        // 如果显示这个，说明嵌入式图片没有正确转换（bug）
-        console.log(`  照片: ✗ 未转换（仍为公式）`);
-        console.log(`    - 公式: ${row.photo1}`);
-        console.log(`    - ⚠️  这可能是一个bug，嵌入式图片应该被自动转换`);
-      } else {
-        console.log(`  照片: ${row.photo1}`);
-      }
+    console.log(`[row ${index + 1}]`);
+    console.log(`  name: ${row.name || '(empty)'}`);
+    console.log(`  age:  ${row.age || '(empty)'}`);
+
+    const photo = row.photo1;
+    if (photo && typeof photo === 'object' && photo.data) {
+      console.log('  photo1: recognized');
+      console.log(`    - file: ${photo.name}`);
+      console.log(`    - type: ${photo.type}`);
+      console.log(`    - size: ${photo.data.length} bytes`);
+
+      const outputDir = path.join(__dirname, 'output', 'embedded-photos');
+      fs.mkdirSync(outputDir, { recursive: true });
+
+      const filename = `${row.name || 'row' + (index + 1)}_${photo.name}`;
+      fs.writeFileSync(path.join(outputDir, filename), photo.data);
+      console.log(`    - saved: ${filename}`);
+    } else if (typeof photo === 'string' && photo.includes('DISPIMG')) {
+      // Seeing this means the embedded image was NOT converted (a bug).
+      console.log('  photo1: NOT converted (still a formula)');
+      console.log(`    - formula: ${photo}`);
     } else {
-      console.log(`  照片: 无`);
+      console.log(`  photo1: ${photo || 'none'}`);
     }
-    
     console.log('');
   });
-  
-  // 统计
-  const withPhotos = data.filter(row => 
-    row.photo1 && typeof row.photo1 === 'object' && row.photo1.data
+
+  const withPhotos = data.filter(
+    (row) => row.photo1 && typeof row.photo1 === 'object' && row.photo1.data
   ).length;
-  
-  console.log('=== 统计 ===');
-  console.log(`总行数: ${data.length}`);
-  console.log(`有照片的行: ${withPhotos}`);
-  console.log(`无照片的行: ${data.length - withPhotos}`);
-  
+
+  console.log('=== Summary ===');
+  console.log(`rows:       ${data.length}`);
+  console.log(`with photo: ${withPhotos}`);
+  console.log(`no photo:   ${data.length - withPhotos}`);
+
   if (withPhotos > 0) {
-    console.log('\n✓ 图片已保存到: ./examples/output/embedded-photos/');
+    console.log('\nImages saved to: ./examples/output/embedded-photos/');
   }
-  
 } catch (error) {
-  console.error('\n✗ 错误:', error.message);
-  console.error(error.stack);
+  console.error(`\nError [${error.code || 'UNKNOWN'}]:`, error.message);
   process.exit(1);
 }
-

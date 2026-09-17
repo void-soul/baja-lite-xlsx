@@ -29,6 +29,7 @@
     "clean": "node-gyp clean",
     "test": "node test/test.js",
     "checksums": "node scripts/generate-checksums.js",
+    "verify:prebuild": "node scripts/verify-prebuild.js prebuilds",
     "example": "node examples/basic.js",
     "example:json": "node examples/json-api.js",
     "example:advanced": "node examples/advanced.js"

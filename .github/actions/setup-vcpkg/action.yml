@@ -1,0 +1,44 @@
+name: Setup vcpkg
+description: Clone/cache vcpkg and install xlnt + libzip for the current platform
+
+runs:
+  using: composite
+  steps:
+    - name: Export VCPKG_ROOT (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $root = Join-Path $env:GITHUB_WORKSPACE '.vcpkg'
+        "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+    - name: Export VCPKG_ROOT (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: echo "VCPKG_ROOT=$GITHUB_WORKSPACE/.vcpkg" >> "$GITHUB_ENV"
+
+    - name: Bootstrap vcpkg
+      shell: bash
+      run: |
+        set -e
+        if [ ! -d .vcpkg/.git ]; then
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git .vcpkg
+        fi
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          ./.vcpkg/bootstrap-vcpkg.bat -disableMetrics
+        else
+          ./.vcpkg/bootstrap-vcpkg.sh -disableMetrics
+        fi
+
+    - name: Install xlnt + libzip
+      shell: bash
+      run: |
+        set -e
+        export VCPKG_DEFAULT_BINARY_CACHE="$GITHUB_WORKSPACE/vcpkg-bincache"
+        mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+        TRIPLET=$(node scripts/vcpkg-triplet.js)
+        echo "vcpkg triplet: $TRIPLET"
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          ./.vcpkg/vcpkg.exe install "xlnt:$TRIPLET" "libzip:$TRIPLET" --recurse
+        else
+          ./.vcpkg/vcpkg install "xlnt:$TRIPLET" "libzip:$TRIPLET" --recurse
+        fi

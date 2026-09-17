@@ -4,44 +4,31 @@
 
 declare module 'baja-lite-xlsx' {
   /**
-   * Image data object (returned in cell values)
-   * 图片数据对象（在单元格值中返回）
+   * Image data object returned in cells that hold a picture.
    */
   export interface ImageDataObject {
-    /** Image data as Buffer */
+    /** Image data as a Buffer. */
     data: Buffer;
-    /** Image filename */
+    /** Image filename (e.g. "image1.png"). */
     name: string;
-    /** MIME type (e.g., 'image/png', 'image/jpeg') */
+    /** MIME type (e.g. "image/png", "image/jpeg"). */
     type: string;
   }
 
-  /**
-   * Options for reading a table.
-   */
+  /** Options for reading a table. */
   export interface ReadTableOptions {
-    /**
-     * Sheet name to read. If not provided, reads the first sheet.
-     * 指定要读取的Sheet名称，不传则读取第一个Sheet
-     */
+    /** Sheet to read; defaults to the first sheet. */
     sheetName?: string;
 
-    /**
-     * Header row index (0-based, non-negative). Default: 0
-     * 表头所在行索引（从0开始），默认为0
-     */
+    /** Header row index (0-based, non-negative). Default: 0 */
     headerRow?: number;
 
-    /**
-     * Row indices to skip (0-based, non-negative).
-     * 需要跳过的行索引数组（从0开始）
-     */
+    /** Row indices to skip (0-based, non-negative). */
     skipRows?: number[];
 
     /**
-     * Header mapping from original header to new property name.
-     * 表头映射，将原表头名称映射为新的属性名
-     * @example { '名称': 'name', '年龄': 'age' }
+     * Header mapping from the original header text to the output property
+     * name, e.g. `{ 'name': 'fullName' }`.
      */
     headerMap?: Record<string, string>;
 
@@ -50,70 +37,63 @@ declare module 'baja-lite-xlsx' {
      * When omitted, strings are treated as file paths unless the base64
      * heuristic matches (long string, base64 charset, decodes to ZIP "PK"
      * magic -- otherwise an INVALID_INPUT error is thrown).
-     * 强制字符串输入的解析方式；不传时按路径处理，仅当启发式判定为
-     * base64 且解码后为 ZIP "PK" 头才按 base64 处理。
      */
     inputEncoding?: 'base64';
 
     /**
      * Cap on rows read per sheet (0 = no cap beyond the format maximum).
-     * Excess rows are truncated and reported via warnings.
-     * 每个 Sheet 读取的行数上限（0 = 不限制），超出部分截断并通过 warnings 报告。
+     * Excess rows are truncated and reported through `warnings`.
      */
     maxRows?: number;
 
-    /**
-     * Cap on columns read per sheet (0 = no cap beyond the format maximum).
-     * 每个 Sheet 读取的列数上限（0 = 不限制）。
-     */
+    /** Cap on columns read per sheet (0 = no cap beyond the format maximum). */
     maxCols?: number;
 
     /**
-     * When true, returns { rows, warnings } instead of just rows.
-     * Warnings cover skipped/unmapped images, truncated sheets, etc.
-     * 为 true 时返回 { rows, warnings }；warnings 记录图片未挂载、
-     * Sheet 截断等非致命诊断信息。
+     * When true the call resolves to `{ rows, warnings }` instead of just the
+     * rows array. Warnings cover unattached images, truncated sheets, vendor
+     * extension workarounds, etc.
      */
     includeWarnings?: boolean;
   }
 
-  /**
-   * Read Excel table and return as JSON array (synchronous).
-   * All cell values are strings; image cells contain ImageDataObject
-   * (or an array of them when multiple images attach to one cell).
-   *
-   * NOTE: this runs the whole parse on the calling thread. For large
-   * files or Electron UIs prefer readTableAsJSONAsync.
-   *
-   * 同步读取 Excel 表格并返回 JSON 数组。所有单元格值为字符串；
-   * 图片单元格为 ImageDataObject（多图挂同一单元格时为数组）。
-   * 大文件/Electron 场景请使用 readTableAsJSONAsync。
-   *
-   * @param input - Excel file path (string), Buffer, or base64 string
-   * @param options - Configuration options
-   * @returns Array of objects, each representing a row (or { rows, warnings }
-   *          when options.includeWarnings is true).
-   * @throws Error with a `code` property:
-   *   - ADDON_NOT_FOUND / FILE_NOT_FOUND / FILE_OPEN_FAILED
-   *   - INVALID_INPUT / INVALID_OPTIONS
-   *   - NO_SHEETS / SHEET_NOT_FOUND / HEADER_ROW_OUT_OF_RANGE
-   *   - PARSE_ERROR / READ_FAILED
-   */
-  export function readTableAsJSON(
-    input: string | Buffer,
-    options?: ReadTableOptions
-  ): Array<Record<string, string | ImageDataObject | ImageDataObject[]>> |
-     { rows: Array<Record<string, string | ImageDataObject | ImageDataObject[]>>, warnings: string[] };
+  /** A single output row: plain string values or image objects. */
+  export type ReadTableRow = Record<string, string | ImageDataObject | ImageDataObject[]>;
+
+  /** Result shape when `includeWarnings` is true. */
+  export interface ReadTableResult {
+    rows: ReadTableRow[];
+    warnings: string[];
+  }
 
   /**
-   * Async variant of readTableAsJSON. Parsing runs on the libuv thread
-   * pool; the event loop is not blocked. Same options, same error codes.
+   * Reads an Excel table synchronously and returns one object per row.
    *
-   * 异步版本：解析在线程池执行，不阻塞事件循环；参数与错误码相同。
+   * All cell values are strings; a cell holding pictures contains an
+   * ImageDataObject (or an array of them when several images attach to the
+   * same cell). NOTE: the whole parse runs on the calling thread -- for large
+   * files or Electron UIs prefer `readTableAsJSONAsync`.
+   *
+   * @param input File path, Buffer, or base64 string.
+   * @param options See ReadTableOptions.
+   * @throws Error with a `code` property:
+   *   ADDON_LOAD_FAILED / ADDON_NOT_FOUND / FILE_NOT_FOUND / FILE_OPEN_FAILED /
+   *   INVALID_INPUT / INVALID_OPTIONS / NO_SHEETS / SHEET_NOT_FOUND /
+   *   HEADER_ROW_OUT_OF_RANGE / PARSE_ERROR / READ_FAILED
    */
+  export function readTableAsJSON(input: string | Buffer, options?: ReadTableOptions): ReadTableRow[];
+  export function readTableAsJSON(
+    input: string | Buffer,
+    options: ReadTableOptions & { includeWarnings: true }
+  ): ReadTableResult;
+
+  /**
+   * Async variant of `readTableAsJSON`: parsing runs on the libuv thread pool
+   * so the event loop is not blocked. Same options and error codes.
+   */
+  export function readTableAsJSONAsync(input: string | Buffer, options?: ReadTableOptions): Promise<ReadTableRow[]>;
   export function readTableAsJSONAsync(
     input: string | Buffer,
-    options?: ReadTableOptions
-  ): Promise<Array<Record<string, string | ImageDataObject | ImageDataObject[]>> |
-           { rows: Array<Record<string, string | ImageDataObject | ImageDataObject[]>>, warnings: string[] }>;
+    options: ReadTableOptions & { includeWarnings: true }
+  ): Promise<ReadTableResult>;
 }

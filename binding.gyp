@@ -1,4 +1,8 @@
 {
+  "variables": {
+    "vcpkg_root%": "<!(node scripts/require-vcpkg-root.js)",
+    "vcpkg_triplet%": "<!(node scripts/vcpkg-triplet.js)"
+  },
   "targets": [
     {
       "target_name": "baja_xlsx",
@@ -11,7 +15,8 @@
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
-        "<(module_root_dir)/src"
+        "<(module_root_dir)/src",
+        "<(vcpkg_root)/installed/<(vcpkg_triplet)/include"
       ],
       "dependencies": [
         "<!(node -p \"require('node-addon-api').gyp\")"
@@ -34,12 +39,9 @@
                 "AdditionalOptions": ["/std:c++17"]
               }
             },
-            "include_dirs": [
-              "<!(node scripts/require-vcpkg-root.js)/installed/x64-windows/include"
-            ],
             "libraries": [
-              "<!(node scripts/require-vcpkg-root.js)/installed/x64-windows/lib/xlnt.lib",
-              "<!(node scripts/require-vcpkg-root.js)/installed/x64-windows/lib/zip.lib"
+              "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/xlnt.lib",
+              "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/zip.lib"
             ]
           }
         ],
@@ -50,13 +52,8 @@
               "-std=c++17",
               "-fexceptions"
             ],
-            "include_dirs": [
-              "<!(node scripts/require-vcpkg-root.js)/installed/x64-linux/include"
-            ],
             "libraries": [
-              "-L<!(node scripts/require-vcpkg-root.js)/installed/x64-linux/lib",
-              "-lxlnt",
-              "-lzip"
+              "<!@(node scripts/vcpkg-link-flags.js)"
             ]
           }
         ],
@@ -69,13 +66,8 @@
               "MACOSX_DEPLOYMENT_TARGET": "10.15",
               "OTHER_CPLUSPLUSFLAGS": ["-std=c++17"]
             },
-            "include_dirs": [
-              "<!(node scripts/require-vcpkg-root.js)/installed/arm64-osx/include"
-            ],
             "libraries": [
-              "-L<!(node scripts/require-vcpkg-root.js)/installed/arm64-osx/lib",
-              "-lxlnt",
-              "-lzip"
+              "<!@(node scripts/vcpkg-link-flags.js)"
             ]
           }
         ]

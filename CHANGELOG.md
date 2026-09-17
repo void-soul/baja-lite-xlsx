@@ -47,6 +47,15 @@ API:
 
 Engineering:
 
+- Prebuild matrix now covers win32-x64, linux-x64, linux-arm64, darwin-arm64
+  and darwin-x64 (the two newer runner labels are allowed to fail without
+  blocking the release); Linux/macOS link flags are generated from the vcpkg
+  lib directory so the static xlnt/libzip dependency chain resolves without a
+  hardcoded list.
+- Cross-platform archive verification (`npm run verify:prebuild`) asserts every
+  published archive contains the `.node` module (and DLLs on Windows).
+- README is bilingual (English first, 简体中文 section); all other artifacts
+  (code, comments, scripts, CHANGELOG, workflow output) are English-only.
 - npm publishing automated in the release workflow via npm Trusted
   Publishing (OIDC, no stored token); runs only after the GitHub Release
   assets exist and skips versions already on the registry.

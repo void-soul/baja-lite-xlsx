@@ -38,31 +38,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      # The runners' preinstalled vcpkg is too old for the preinstalled
-      # MSVC 18 toolchain (cmake/ninja configure failures), so use a fresh
-      # vcpkg checkout -- the same setup that made the tag release job's
-      # "vcpkg install" step succeed.
+      # The runners' preinstalled vcpkg is too old for modern MSVC
+      # toolchains, so this action checks out a fresh vcpkg and installs
+      # xlnt + libzip for the current platform/triplet.
       - name: Cache vcpkg
         uses: actions/cache@v4
         with:
           path: |
-            C:\vcpkg-ci
+            .vcpkg
             vcpkg-bincache
-          key: vcpkg-master-xlnt-libzip-x64-windows
-      - name: Set up vcpkg
-        shell: pwsh
-        run: |
-          if (-not (Test-Path C:\vcpkg-ci\.git)) {
-            git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg-ci
-          }
-          & C:\vcpkg-ci\bootstrap-vcpkg.bat -disableMetrics
-          "VCPKG_ROOT=C:\vcpkg-ci" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Install vcpkg dependencies
-        shell: pwsh
-        run: |
-          $env:VCPKG_DEFAULT_BINARY_CACHE = "$env:GITHUB_WORKSPACE\vcpkg-bincache"
-          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-          & "$env:VCPKG_ROOT\vcpkg.exe" install xlnt:x64-windows libzip:x64-windows --recurse
+          key: vcpkg-master-win32-x64
+      - name: Setup vcpkg (xlnt + libzip)
+        uses: ./.github/actions/setup-vcpkg
       - name: Install JS dependencies
         run: npm install --ignore-scripts
       - name: Build native addon

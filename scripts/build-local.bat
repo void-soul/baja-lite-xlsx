@@ -1,136 +1,77 @@
 @echo off
-chcp 65001
+setlocal
 echo ============================================
-echo Baja-XLSX 本地编译脚本
+echo Baja-Lite-XLSX local build script
 echo ============================================
 echo.
 
-REM 检查 vcpkg 路径
-set VCPKG_FOUND=0
-
-if exist "E:\vcpkg\vcpkg.exe" (
-    set VCPKG_ROOT=E:\vcpkg
-    set VCPKG_FOUND=1
-    echo [✓] 找到 vcpkg: E:\vcpkg
+REM Locate vcpkg: VCPKG_ROOT wins, then the usual install locations.
+if not defined VCPKG_ROOT (
+    if exist "C:\vcpkg\vcpkg.exe" set VCPKG_ROOT=C:\vcpkg
 )
-
-if exist "C:\vcpkg\vcpkg.exe" (
-    set VCPKG_ROOT=C:\vcpkg
-    set VCPKG_FOUND=1
-    echo [✓] 找到 vcpkg: C:\vcpkg
-)
-
-if %VCPKG_FOUND%==0 (
-    echo [✗] 未找到 vcpkg
+if not defined VCPKG_ROOT (
+    echo [x] vcpkg not found.
     echo.
-    echo 请先安装 vcpkg 和 xlnt：
-    echo   方法 1: 运行自动安装脚本
-    echo     install-vcpkg-and-deps.bat
+    echo Install it first:
+    echo   git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+    echo   cd /d C:\vcpkg
+    echo   .\bootstrap-vcpkg.bat
+    echo   .\vcpkg install xlnt:x64-windows
+    echo   .\vcpkg install libzip:x64-windows
     echo.
-    echo   方法 2: 手动安装
-    echo     cd E:\
-    echo     git clone https://github.com/Microsoft/vcpkg.git
-    echo     cd vcpkg
-    echo     .\bootstrap-vcpkg.bat
-    echo     .\vcpkg install xlnt:x64-windows
-    echo     .\vcpkg install libzip:x64-windows
+    echo Then set:  set VCPKG_ROOT=C:\vcpkg
     echo.
     pause
     exit /b 1
 )
 
-REM 检查 xlnt 是否已安装
+echo Using VCPKG_ROOT=%VCPKG_ROOT%
+echo.
+
 if not exist "%VCPKG_ROOT%\installed\x64-windows\include\xlnt\xlnt.hpp" (
-    echo [✗] xlnt 未安装
-    echo.
-    echo 正在安装 xlnt...
-    cd /d %VCPKG_ROOT%
-    call vcpkg install xlnt:x64-windows
-    
-    if %errorlevel% neq 0 (
-        echo [✗] xlnt 安装失败
-        pause
-        exit /b 1
-    )
-    
-    echo [✓] xlnt 安装成功
-) else (
-    echo [✓] xlnt 已安装
+    echo [x] xlnt is not installed.
+    echo     Run:  "%VCPKG_ROOT%\vcpkg.exe" install xlnt:x64-windows
+    pause
+    exit /b 1
 )
 
-REM 检查 libzip 是否已安装
 if not exist "%VCPKG_ROOT%\installed\x64-windows\include\zip.h" (
-    echo [!] libzip 未安装，正在安装...
-    cd /d %VCPKG_ROOT%
-    call vcpkg install libzip:x64-windows
-    
-    if %errorlevel% neq 0 (
-        echo [✗] libzip 安装失败
-        pause
-        exit /b 1
-    )
-    
-    echo [✓] libzip 安装成功
-) else (
-    echo [✓] libzip 已安装
+    echo [x] libzip is not installed.
+    echo     Run:  "%VCPKG_ROOT%\vcpkg.exe" install libzip:x64-windows
+    pause
+    exit /b 1
 )
 
-echo.
-echo ============================================
-echo 开始编译...
-echo ============================================
-echo.
-echo VCPKG_ROOT=%VCPKG_ROOT%
-echo.
+cd /d "%~dp0.."
 
-REM 回到项目目录
-cd /d %~dp0
-
-REM 设置环境变量并编译
-set VCPKG_ROOT=%VCPKG_ROOT%
-
-echo [1/2] 清理旧的构建...
+echo [1/3] Cleaning previous build...
 call npm run clean 2>nul
 
 echo.
-echo [2/2] 重新编译原生模块...
+echo [2/3] Building the native addon...
 call npm run build
-
 if %errorlevel% neq 0 (
     echo.
-    echo [✗] 编译失败
-    echo.
-    echo 请检查:
-    echo   1. Visual Studio Build Tools 是否已安装
-    echo   2. Node.js 版本是否 ^>= 16
-    echo   3. vcpkg 依赖是否正确安装
+    echo [x] Build failed. Check that:
+    echo   1. Visual Studio Build Tools are installed
+    echo   2. Node.js ^>= 16
+    echo   3. vcpkg dependencies (xlnt, libzip) are installed
     echo.
     pause
     exit /b 1
 )
 
 echo.
-echo ============================================
-echo [✓] 编译成功！
-echo ============================================
-echo.
-
-REM 复制 DLL
-echo [3/3] 复制依赖的 DLL...
+echo [3/3] Copying runtime DLLs...
 call npm run copy-dlls
 
-if %errorlevel% neq 0 (
-    echo [!] DLL 复制可能失败，但不影响本地使用
-)
-
 echo.
 echo ============================================
-echo [✅] 本地编译完成！
+echo [ok] Local build finished
 echo ============================================
 echo.
-echo 现在可以:
-echo   1. 运行示例: npm run example
-echo   2. 测试模块: node test.js
+echo Next steps:
+echo   1. Run an example:  npm run example
+echo   2. Run the tests:   npm test
 echo.
 pause
-
