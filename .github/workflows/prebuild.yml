@@ -24,34 +24,40 @@ jobs:
         with:
           node-version: '20'
       
-      - name: Install vcpkg and dependencies
+      - name: Export VCPKG_ROOT
         run: |
-          git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-          cd C:\vcpkg
-          .\bootstrap-vcpkg.bat
-          Write-Host "Installing xlnt and libzip..."
-          .\vcpkg install xlnt:x64-windows libzip:x64-windows
-          Write-Host "Installation complete!"
-        shell: powershell
-      
-      - name: Set environment variables
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $root) { $root = 'C:\vcpkg' }
+          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+        shell: pwsh
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-xlnt-libzip-x64-windows
+
+      - name: Install vcpkg dependencies
+        shell: pwsh
         run: |
-          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
-          [System.Environment]::SetEnvironmentVariable('VCPKG_ROOT', 'C:\vcpkg', [System.EnvironmentVariableTarget]::Process)
-        shell: powershell
+          New-Item -ItemType Directory -Force -Path vcpkg-bincache | Out-Null
+          $env:VCPKG_DEFAULT_BINARY_CACHE = (Resolve-Path vcpkg-bincache)
+          vcpkg install xlnt:x64-windows libzip:x64-windows --recurse
 
       - name: Verify vcpkg installation
+        shell: pwsh
         run: |
-          Write-Host "VCPKG_ROOT: C:\vcpkg"
+          $root = $env:VCPKG_ROOT
+          Write-Host "VCPKG_ROOT: $root"
           Write-Host ""
           Write-Host "Checking xlnt installation..."
-          if (Test-Path "C:\vcpkg\installed\x64-windows\include\xlnt\xlnt.hpp") {
+          if (Test-Path "$root/installed/x64-windows/include/xlnt/xlnt.hpp") {
             Write-Host "[OK] xlnt.hpp found"
           } else {
             Write-Host "[ERROR] xlnt.hpp NOT found"
             exit 1
           }
-          if (Test-Path "C:\vcpkg\installed\x64-windows\lib\xlnt.lib") {
+          if (Test-Path "$root/installed/x64-windows/lib/xlnt.lib") {
             Write-Host "[OK] xlnt.lib found"
           } else {
             Write-Host "[ERROR] xlnt.lib NOT found"
@@ -59,13 +65,13 @@ jobs:
           }
           Write-Host ""
           Write-Host "Checking libzip installation..."
-          if (Test-Path "C:\vcpkg\installed\x64-windows\include\zip.h") {
+          if (Test-Path "$root/installed/x64-windows/include/zip.h") {
             Write-Host "[OK] zip.h found"
           } else {
             Write-Host "[ERROR] zip.h NOT found"
             exit 1
           }
-          if (Test-Path "C:\vcpkg\installed\x64-windows\lib\zip.lib") {
+          if (Test-Path "$root/installed/x64-windows/lib/zip.lib") {
             Write-Host "[OK] zip.lib found"
           } else {
             Write-Host "[ERROR] zip.lib NOT found"
@@ -73,34 +79,25 @@ jobs:
           }
           Write-Host ""
           Write-Host "[SUCCESS] All dependencies verified!"
-        shell: powershell
-      
-      - name: Configure scripts/binding.gyp for CI
-        run: |
-          node -e "const fs = require('fs'); let content = fs.readFileSync('scripts/binding.gyp', 'utf8'); content = content.replace(/<!\(echo %VCPKG_ROOT%\)/g, 'C:/vcpkg'); fs.writeFileSync('scripts/binding.gyp', content); console.log('[OK] Updated scripts/binding.gyp with vcpkg path');"
-          Get-Content scripts/binding.gyp | Select-String -Pattern "C:/vcpkg" | ForEach-Object { Write-Host "Verified: $_" }
-        shell: powershell
-      
+
       - name: Install npm dependencies
         run: npm install --ignore-scripts
-        env:
-          VCPKG_ROOT: C:\vcpkg
 
       - name: Create prebuild package for Node.js
         run: npx prebuild --runtime napi --target 8 --strip
-        env:
-          VCPKG_ROOT: C:\vcpkg
-      
+
       - name: Create prebuild package for Electron 34
         run: npx prebuild --runtime electron --target 34.0.0 --strip
-        env:
-          VCPKG_ROOT: C:\vcpkg
-      
+
       - name: Pack DLLs into prebuild packages
         run: node scripts/pack-dlls-into-prebuild.js
-        env:
-          VCPKG_ROOT: C:\vcpkg
-      
+
+      - name: Run tests
+        run: npm test
+
+      - name: Generate checksums
+        run: npm run checksums
+
       - name: List generated files
         run: |
           Write-Host "Generated prebuild packages:"
