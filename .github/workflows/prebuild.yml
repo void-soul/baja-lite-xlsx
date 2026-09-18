@@ -92,6 +92,9 @@ jobs:
           grep -E "^FAIL" test-output.log | head -20 | while IFS= read -r line; do
             echo "::error::$line"
           done
+          grep -E "^(PASS|FAIL)" test-output.log | tail -8 | while IFS= read -r line; do
+            echo "::error::tail ${line:0:120}"
+          done
           tail -30 test-output.log
           exit $status
 
