@@ -1271,7 +1271,7 @@ public:
     }
 
     void OnOK() override {
-        Env env = Env();
+        Napi::Env env = Env();
         if (outputPath_.empty()) {
             deferred_.Resolve(Buffer<uint8_t>::Copy(env, out_.data(), out_.size()));
             return;
@@ -1350,7 +1350,7 @@ public:
     }
 
     void OnOK() override {
-        Env env = Env();
+        Napi::Env env = Env();
         if (outputPath_.empty()) {
             deferred_.Resolve(Buffer<uint8_t>::Copy(env, out_.data(), out_.size()));
             return;
@@ -1431,7 +1431,7 @@ public:
     }
 
     void OnOK() override {
-        Env env = Env();
+        Napi::Env env = Env();
         if (outputPath_.empty()) {
             deferred_.Resolve(Buffer<uint8_t>::Copy(env, out_.data(), out_.size()));
             return;
