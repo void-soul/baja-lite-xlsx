@@ -475,7 +475,7 @@ function normalizeWriteColumns(rows, columns) {
  * @param {number} [options.compression] - 0 (store) .. 9 (max).
  * @returns {Buffer|{bytes: number, rowCount: number, sheetName: string}}
  */
-function writeTableAsJSON(rows, options = {}) {
+function validateWriteOptions(rows, options) {
   if (!Array.isArray(rows)) {
     throw makeError('INVALID_OPTIONS', 'rows must be an array');
   }
@@ -514,20 +514,44 @@ function writeTableAsJSON(rows, options = {}) {
   }
   validateCompression(compression);
 
-  const specs = normalizeWriteColumns(rows, columns);
+  return {
+    sheetName,
+    includeHeader,
+    freezeHeader,
+    output: output === undefined ? undefined : path.resolve(output),
+    compression,
+    columns: normalizeWriteColumns(rows, columns),
+    template: Buffer.isBuffer(template) || template === undefined || template === null
+      ? template
+      : path.resolve(template)
+  };
+}
 
+function writeTableAsJSON(rows, options = {}) {
+  const nativeOptions = validateWriteOptions(rows, options);
   try {
-    return addon.writeExcel(rows, {
-      sheetName,
-      includeHeader,
-      freezeHeader,
-      output: output === undefined ? undefined : path.resolve(output),
-      compression,
-      columns: specs,
-      template: Buffer.isBuffer(template) || template === undefined || template === null
-        ? template
-        : path.resolve(template)
-    });
+    return addon.writeExcel(rows, nativeOptions);
+  } catch (err) {
+    if (!err.code) {
+      err.code = 'WRITE_FAILED';
+    }
+    throw err;
+  }
+}
+
+/**
+ * Asynchronous `writeTableAsJSON`. The rows are copied into a compact native
+ * snapshot on the calling thread (that part cannot move: the data lives in JS)
+ * and everything expensive — worksheet XML, deflate, package assembly and the
+ * file write — then runs on the libuv thread pool, so the event loop keeps
+ * serving requests while a large workbook is produced.
+ *
+ * Accepts the same arguments and resolves to the same Buffer / summary.
+ */
+async function writeTableAsJSONAsync(rows, options = {}) {
+  const nativeOptions = validateWriteOptions(rows, options);
+  try {
+    return await addon.writeExcelAsync(rows, nativeOptions);
   } catch (err) {
     if (!err.code) {
       err.code = 'WRITE_FAILED';
@@ -560,7 +584,7 @@ function validateCompression(compression) {
  * @param {number} [spec.compression] - 0 (store) .. 9 (max).
  * @returns {Buffer|{bytes: number, cells: number}}
  */
-function updateCells(spec = {}) {
+function validateUpdateSpec(spec) {
   if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
     throw makeError('INVALID_OPTIONS', 'updateCells expects an options object');
   }
@@ -593,13 +617,34 @@ function updateCells(spec = {}) {
   }
   validateCompression(compression);
 
+  return {
+    template: Buffer.isBuffer(template) ? template : path.resolve(template),
+    updates,
+    output: output === undefined ? undefined : path.resolve(output),
+    compression
+  };
+}
+
+function updateCells(spec = {}) {
+  const nativeOptions = validateUpdateSpec(spec);
   try {
-    return addon.writeCells({
-      template: Buffer.isBuffer(template) ? template : path.resolve(template),
-      updates,
-      output: output === undefined ? undefined : path.resolve(output),
-      compression
-    });
+    return addon.writeCells(nativeOptions);
+  } catch (err) {
+    if (!err.code) {
+      err.code = 'WRITE_FAILED';
+    }
+    throw err;
+  }
+}
+
+/**
+ * Asynchronous `updateCells`: the updates are snapshotted, then patching,
+ * compression and the file write run off the event loop.
+ */
+async function updateCellsAsync(spec = {}) {
+  const nativeOptions = validateUpdateSpec(spec);
+  try {
+    return await addon.writeCellsAsync(nativeOptions);
   } catch (err) {
     if (!err.code) {
       err.code = 'WRITE_FAILED';
@@ -713,7 +758,7 @@ function flattenTemplateValues(values) {
  * @param {number} [options.compression] - 0 (store) .. 9 (max).
  * @returns {Buffer|{bytes: number, sheets: string[]}}
  */
-function renderTemplate(values, options = {}) {
+function validateRenderSpec(values, options) {
   if (options === null || typeof options !== 'object' || Array.isArray(options)) {
     throw makeError('INVALID_OPTIONS', 'options must be an object');
   }
@@ -734,19 +779,39 @@ function renderTemplate(values, options = {}) {
   }
   validateCompression(compression);
 
-  const flat = flattenTemplateValues(values);
+  return {
+    template: Buffer.isBuffer(template) ? template : path.resolve(template),
+    values: flattenTemplateValues(values),
+    options: {
+      sheetName,
+      strict,
+      output: output === undefined ? undefined : path.resolve(output),
+      compression
+    }
+  };
+}
 
+function renderTemplate(values, options = {}) {
+  const spec = validateRenderSpec(values, options);
   try {
-    return addon.renderTemplate(
-      Buffer.isBuffer(template) ? template : path.resolve(template),
-      flat,
-      {
-        sheetName,
-        strict,
-        output: output === undefined ? undefined : path.resolve(output),
-        compression
-      }
-    );
+    return addon.renderTemplate(spec.template, spec.values, spec.options);
+  } catch (err) {
+    if (!err.code) {
+      err.code = 'WRITE_FAILED';
+    }
+    throw err;
+  }
+}
+
+/**
+ * Asynchronous `renderTemplate`: the values are flattened and snapshotted on the
+ * calling thread, then the whole render (template walk, deflate, package
+ * assembly, file write) runs on the libuv thread pool.
+ */
+async function renderTemplateAsync(values, options = {}) {
+  const spec = validateRenderSpec(values, options);
+  try {
+    return await addon.renderTemplateAsync(spec.template, spec.values, spec.options);
   } catch (err) {
     if (!err.code) {
       err.code = 'WRITE_FAILED';
@@ -847,6 +912,9 @@ module.exports = {
   readTableAsJSON,
   readTableAsJSONAsync,
   writeTableAsJSON,
+  writeTableAsJSONAsync,
   updateCells,
-  renderTemplate
+  updateCellsAsync,
+  renderTemplate,
+  renderTemplateAsync
 };

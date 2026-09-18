@@ -19,7 +19,8 @@ All three return a `Buffer` when no `output` path is given, and a small
 | 1b `writeTableAsJSON({ template })` | 1.2.0 |
 | 2 `updateCells` | 1.2.0 |
 | 3 `renderTemplate` | 1.3.0 |
-| Async twins for the write side, template structure cache | planned |
+| Async twins for the write side | 1.4.0 |
+| Template structure cache, write benchmarks | planned |
 
 ## The two requirements: fast and accurate
 

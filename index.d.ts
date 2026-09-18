@@ -219,6 +219,23 @@ declare module 'baja-lite-xlsx' {
     options?: WriteTableOptions
   ): Buffer;
 
+  /**
+   * Asynchronous `writeTableAsJSON`. The rows are copied into a compact native
+   * snapshot on the calling thread (the data lives in JS, so that part cannot
+   * move) and everything expensive — worksheet XML, deflate, package assembly
+   * and the file write — runs on the libuv thread pool. The event loop stays
+   * free, so servers and Electron UIs keep responding while a large workbook is
+   * produced. Same options, same result; failures reject with the same `code`.
+   */
+  export function writeTableAsJSONAsync(
+    rows: Array<Record<string, unknown>> | unknown[][],
+    options: WriteTableOptions & { output: string }
+  ): Promise<WriteResult>;
+  export function writeTableAsJSONAsync(
+    rows: Array<Record<string, unknown>> | unknown[][],
+    options?: WriteTableOptions
+  ): Promise<Buffer>;
+
   /** One cell rewrite for `updateCells`. */
   export interface CellUpdate {
     /** Worksheet to patch; defaults to the first sheet. */
@@ -263,6 +280,12 @@ declare module 'baja-lite-xlsx' {
    */
   export function updateCells(options: UpdateCellsOptions & { output: string }): UpdateCellsResult;
   export function updateCells(options: UpdateCellsOptions): Buffer;
+
+  /** Asynchronous `updateCells`: patching and compression run off the event loop. */
+  export function updateCellsAsync(
+    options: UpdateCellsOptions & { output: string }
+  ): Promise<UpdateCellsResult>;
+  export function updateCellsAsync(options: UpdateCellsOptions): Promise<Buffer>;
 
   export interface RenderTemplateOptions {
     /** Template workbook (path or bytes). */
@@ -318,4 +341,14 @@ declare module 'baja-lite-xlsx' {
     values: Record<string, unknown>,
     options: RenderTemplateOptions
   ): Buffer;
+
+  /** Asynchronous `renderTemplate`: the render runs off the event loop. */
+  export function renderTemplateAsync(
+    values: Record<string, unknown>,
+    options: RenderTemplateOptions & { output: string }
+  ): Promise<RenderTemplateResult>;
+  export function renderTemplateAsync(
+    values: Record<string, unknown>,
+    options: RenderTemplateOptions
+  ): Promise<Buffer>;
 }

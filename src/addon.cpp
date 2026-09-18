@@ -1,5 +1,6 @@
 #include <napi.h>
 #include "path_util.h"
+#include "write_snapshot.h"
 #include "xlsx_patch.h"
 #include "xlsx_reader.h"
 #include "xlsx_template.h"
@@ -767,6 +768,24 @@ std::string readOutputPath(const Object& options) {
     return value.IsString() ? value.As<String>().Utf8Value() : std::string();
 }
 
+// Writes a finished package to disk. No JS involved, so the async workers can
+// run this off the main thread too.
+bool writeBytesToFile(const std::string& path, const std::vector<uint8_t>& bytes,
+                      std::string& error) {
+    std::FILE* file = pathutil::openForWrite(path);
+    if (!file) {
+        error = "FILE_WRITE_FAILED|Cannot create " + path;
+        return false;
+    }
+    const size_t written = bytes.empty() ? 0 : std::fwrite(bytes.data(), 1, bytes.size(), file);
+    std::fclose(file);
+    if (written != bytes.size()) {
+        error = "FILE_WRITE_FAILED|Failed to write " + path;
+        return false;
+    }
+    return true;
+}
+
 // Writes the assembled package to `path`, or hands it back as a Buffer.
 Value finishWrite(Env env, const std::vector<uint8_t>& out, const std::string& outputPath,
                   Object summary) {
@@ -774,14 +793,9 @@ Value finishWrite(Env env, const std::vector<uint8_t>& out, const std::string& o
         return Buffer<uint8_t>::Copy(env, out.data(), out.size());
     }
 
-    std::FILE* file = pathutil::openForWrite(outputPath);
-    if (!file) {
-        return failWith(env, "FILE_WRITE_FAILED|Cannot create " + outputPath);
-    }
-    const size_t written = out.empty() ? 0 : std::fwrite(out.data(), 1, out.size(), file);
-    std::fclose(file);
-    if (written != out.size()) {
-        return failWith(env, "FILE_WRITE_FAILED|Failed to write " + outputPath);
+    std::string error;
+    if (!writeBytesToFile(outputPath, out, error)) {
+        return failWith(env, error);
     }
 
     summary.Set("bytes", Number::New(env, static_cast<double>(out.size())));
@@ -867,25 +881,27 @@ private:
     uint32_t index_ = 0;
 };
 
-Value WriteExcel(const CallbackInfo& info) {
+// Parses (rows, options) for a sheet write: the plan, how each column reads its
+// value, and the workbook to start from. Shared by the sync and async entry
+// points so both accept exactly the same options.
+bool readSheetWriteArguments(const CallbackInfo& info, WritePlan& plan,
+                             std::vector<ColumnSource>& columnSources,
+                             TemplateArgument& templateArg, Napi::Array& rows, Object& options) {
     Env env = info.Env();
 
     if (info.Length() < 1 || !info[0].IsArray()) {
         TypeError::New(env, "First argument must be an array of rows")
             .ThrowAsJavaScriptException();
-        return env.Null();
+        return false;
     }
     if (info.Length() < 2 || !info[1].IsObject()) {
         TypeError::New(env, "Second argument must be an options object")
             .ThrowAsJavaScriptException();
-        return env.Null();
+        return false;
     }
 
-    Napi::Array rows = info[0].As<Napi::Array>();
-    Object options = info[1].As<Object>();
-
-    WritePlan plan;
-    std::vector<ColumnSource> columnSources;
+    rows = info[0].As<Napi::Array>();
+    options = info[1].As<Object>();
 
     if (options.Has("sheetName")) {
         Value value = options.Get("sheetName");
@@ -955,14 +971,53 @@ Value WriteExcel(const CallbackInfo& info) {
         }
     }
 
-    TemplateArgument templateArg;
     if (!readTemplateArgument(options, templateArg)) {
-        return failWith(env, "INVALID_OPTIONS|options.template must be a file path or a Buffer");
+        failWith(env, "INVALID_OPTIONS|options.template must be a file path or a Buffer");
+        return false;
     }
     if (!options.Has("sheetName")) {
         // A new workbook gets the default name; a template keeps its first sheet
         // unless the caller names one.
         plan.sheetName = templateArg.present ? std::string() : std::string("Sheet1");
+    }
+    return true;
+}
+
+// Copies the JS rows into the compact snapshot. This is the only part of an
+// async write that runs on the main thread (it has to: the data lives in JS),
+// and it is what makes the worker able to generate the workbook alone.
+void snapshotRows(Env env, const Napi::Array& rows, const std::vector<ColumnSource>& columns,
+                  WriteSnapshot& out) {
+    const uint32_t count = rows.Length();
+    out.reserve(count, static_cast<size_t>(count) * columns.size());
+
+    std::vector<WriteCell> row;
+    row.reserve(columns.size());
+    for (uint32_t i = 0; i < count; ++i) {
+        const Value item = rows.Get(i);
+        row.clear();
+        for (const ColumnSource& column : columns) {
+            Value value = env.Null();
+            if (item.IsObject()) {
+                Object object = item.As<Object>();
+                value = column.byIndex ? object.Get(column.index) : object.Get(column.key);
+            }
+            row.push_back(toWriteCell(value));
+        }
+        out.addRow(row);
+    }
+}
+
+Value WriteExcel(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    WritePlan plan;
+    std::vector<ColumnSource> columnSources;
+    TemplateArgument templateArg;
+    Napi::Array rows;
+    Object options;
+    if (!readSheetWriteArguments(info, plan, columnSources, templateArg, rows, options)) {
+        return env.Null();
     }
 
     JsRowSource source(env, rows, std::move(columnSources));
@@ -988,6 +1043,49 @@ Value WriteExcel(const CallbackInfo& info) {
 // Writing: patch individual cells of an existing workbook (mode 2).
 // ---------------------------------------------------------------------------
 
+// Parses `options.updates`. Shared by the sync and async entry points.
+bool readUpdateList(Env env, const Object& spec, std::vector<CellUpdate>& updates) {
+    if (!spec.Has("updates") || !spec.Get("updates").IsArray()) {
+        failWith(env, "INVALID_OPTIONS|options.updates must be an array");
+        return false;
+    }
+
+    const Array items = spec.Get("updates").As<Array>();
+    const uint32_t count = items.Length();
+    updates.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const Value item = items.Get(i);
+        if (!item.IsObject()) {
+            failWith(env, "INVALID_OPTIONS|options.updates[" + std::to_string(i) +
+                              "] must be an object");
+            return false;
+        }
+        Object entry = item.As<Object>();
+
+        CellUpdate update;
+        if (entry.Has("sheet")) {
+            const Value value = entry.Get("sheet");
+            if (value.IsString()) update.sheet = value.As<String>().Utf8Value();
+        }
+        if (entry.Has("cell")) {
+            const Value value = entry.Get("cell");
+            if (value.IsString()) update.cell = value.As<String>().Utf8Value();
+        }
+        if (update.cell.empty()) {
+            failWith(env, "INVALID_OPTIONS|options.updates[" + std::to_string(i) +
+                              "].cell is required");
+            return false;
+        }
+        if (entry.Has("numberFormat")) {
+            const Value value = entry.Get("numberFormat");
+            if (value.IsString()) update.numberFormat = value.As<String>().Utf8Value();
+        }
+        update.value = toWriteCell(entry.Has("value") ? entry.Get("value") : env.Null());
+        updates.push_back(std::move(update));
+    }
+    return true;
+}
+
 Value WriteCells(const CallbackInfo& info) {
     Env env = info.Env();
 
@@ -1002,41 +1100,10 @@ Value WriteCells(const CallbackInfo& info) {
         return failWith(env,
                         "INVALID_OPTIONS|options.template is required (file path or Buffer)");
     }
-    if (!spec.Has("updates") || !spec.Get("updates").IsArray()) {
-        return failWith(env, "INVALID_OPTIONS|options.updates must be an array");
-    }
 
     std::vector<CellUpdate> updates;
-    Array items = spec.Get("updates").As<Array>();
-    const uint32_t count = items.Length();
-    updates.reserve(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        const Value item = items.Get(i);
-        if (!item.IsObject()) {
-            return failWith(env, "INVALID_OPTIONS|options.updates[" + std::to_string(i) +
-                                     "] must be an object");
-        }
-        Object entry = item.As<Object>();
-
-        CellUpdate update;
-        if (entry.Has("sheet")) {
-            const Value value = entry.Get("sheet");
-            if (value.IsString()) update.sheet = value.As<String>().Utf8Value();
-        }
-        if (entry.Has("cell")) {
-            const Value value = entry.Get("cell");
-            if (value.IsString()) update.cell = value.As<String>().Utf8Value();
-        }
-        if (update.cell.empty()) {
-            return failWith(env, "INVALID_OPTIONS|options.updates[" + std::to_string(i) +
-                                     "].cell is required");
-        }
-        if (entry.Has("numberFormat")) {
-            const Value value = entry.Get("numberFormat");
-            if (value.IsString()) update.numberFormat = value.As<String>().Utf8Value();
-        }
-        update.value = toWriteCell(entry.Has("value") ? entry.Get("value") : env.Null());
-        updates.push_back(std::move(update));
+    if (!readUpdateList(env, spec, updates)) {
+        return env.Null();
     }
 
     std::vector<uint8_t> out;
@@ -1057,6 +1124,35 @@ Value WriteCells(const CallbackInfo& info) {
 // Writing: template rendering (mode 3). Values arrive flattened (path ->
 // primitive), so the renderer never has to call back into JS.
 // ---------------------------------------------------------------------------
+
+// The template workbook may be passed directly (a path or a Buffer).
+bool readTemplateValue(const Value& value, TemplateArgument& out) {
+    if (value.IsString()) {
+        out.present = true;
+        out.path = value.As<String>().Utf8Value();
+        return true;
+    }
+    if (value.IsBuffer()) {
+        out.present = true;
+        Buffer<uint8_t> buffer = value.As<Buffer<uint8_t>>();
+        out.bytes.assign(buffer.Data(), buffer.Data() + buffer.Length());
+        return true;
+    }
+    return false;
+}
+
+TemplatePlan readTemplatePlan(const Object& options) {
+    TemplatePlan plan;
+    if (options.Has("sheetName")) {
+        const Value value = options.Get("sheetName");
+        if (value.IsString()) plan.sheetName = value.As<String>().Utf8Value();
+    }
+    if (options.Has("strict")) {
+        const Value value = options.Get("strict");
+        if (value.IsBoolean()) plan.strict = value.As<Boolean>().Value();
+    }
+    return plan;
+}
 
 void readTemplateValues(const Object& source, TemplateValues& out) {
     Napi::Array keys = source.GetPropertyNames();
@@ -1096,15 +1192,7 @@ Value RenderTemplate(const CallbackInfo& info) {
     }
 
     TemplateArgument templateArg;
-    const Value templateValue = info[0];
-    if (templateValue.IsString()) {
-        templateArg.present = true;
-        templateArg.path = templateValue.As<String>().Utf8Value();
-    } else if (templateValue.IsBuffer()) {
-        templateArg.present = true;
-        Buffer<uint8_t> buffer = templateValue.As<Buffer<uint8_t>>();
-        templateArg.bytes.assign(buffer.Data(), buffer.Data() + buffer.Length());
-    } else {
+    if (!readTemplateValue(info[0], templateArg)) {
         return failWith(env, "INVALID_OPTIONS|options.template is required (file path or Buffer)");
     }
 
@@ -1113,15 +1201,7 @@ Value RenderTemplate(const CallbackInfo& info) {
 
     Object options = (info.Length() > 2 && info[2].IsObject()) ? info[2].As<Object>()
                                                                : Object::New(env);
-    TemplatePlan plan;
-    if (options.Has("sheetName")) {
-        const Value value = options.Get("sheetName");
-        if (value.IsString()) plan.sheetName = value.As<String>().Utf8Value();
-    }
-    if (options.Has("strict")) {
-        const Value value = options.Get("strict");
-        if (value.IsBoolean()) plan.strict = value.As<Boolean>().Value();
-    }
+    const TemplatePlan plan = readTemplatePlan(options);
 
     std::vector<uint8_t> out;
     std::vector<std::string> renderedSheets;
@@ -1140,6 +1220,270 @@ Value RenderTemplate(const CallbackInfo& info) {
 }
 
 // ---------------------------------------------------------------------------
+// Writing: asynchronous twins. The JS inputs are copied into plain C++
+// structures on the main thread -- unavoidable, since the data lives in JS --
+// and the expensive work (XML generation, deflate, package assembly, the file
+// write) then runs on the libuv thread pool. The compact snapshot is what makes
+// it legal: no worker ever touches a JS value.
+// ---------------------------------------------------------------------------
+
+// Guards every worker body: a failure must surface as a rejected promise, never
+// as an exception escaping a thread.
+#define BAJA_WORKER_GUARD(body)                             \
+    try {                                                   \
+        body                                                \
+    } catch (const std::exception& e) {                     \
+        SetError(std::string("WRITE_FAILED|") + e.what());  \
+    } catch (...) {                                         \
+        SetError("WRITE_FAILED|Unknown non-std exception"); \
+    }
+
+class WriteExcelWorker : public Napi::AsyncWorker {
+public:
+    WriteExcelWorker(Napi::Env env, WritePlan plan, WriteSnapshot snapshot,
+                     TemplateArgument templateArg, zipio::ZipWriter::Compression compression,
+                     std::string outputPath)
+        : Napi::AsyncWorker(env),
+          deferred_(Napi::Promise::Deferred::New(env)),
+          plan_(std::move(plan)),
+          snapshot_(std::move(snapshot)),
+          templateArg_(std::move(templateArg)),
+          compression_(compression),
+          outputPath_(std::move(outputPath)) {}
+
+    Napi::Promise Promise() { return deferred_.Promise(); }
+
+    void Execute() override {
+        BAJA_WORKER_GUARD(
+            std::string error;
+            const bool ok = templateArg_.present
+                ? replaceSheetData(templateArg_.source(), plan_, snapshot_, compression_, out_,
+                                   error)
+                : writeNewWorkbook(plan_, snapshot_, compression_, out_, error);
+            if (!ok) {
+                SetError(error.empty() ? "WRITE_FAILED|Failed to build the workbook" : error);
+                return;
+            }
+            if (!outputPath_.empty() && !writeBytesToFile(outputPath_, out_, error)) {
+                SetError(error);
+            }
+        )
+    }
+
+    void OnOK() override {
+        Env env = Env();
+        if (outputPath_.empty()) {
+            deferred_.Resolve(Buffer<uint8_t>::Copy(env, out_.data(), out_.size()));
+            return;
+        }
+        Object summary = Object::New(env);
+        summary.Set("bytes", Number::New(env, static_cast<double>(out_.size())));
+        summary.Set("rowCount", Number::New(env, static_cast<double>(snapshot_.rowCount())));
+        summary.Set("sheetName", String::New(env, plan_.sheetName));
+        deferred_.Resolve(summary);
+    }
+
+    void OnError(const Napi::Error& e) override {
+        deferred_.Reject(makeCodedError(Env(), e.Message()).Value());
+    }
+
+private:
+    Napi::Promise::Deferred deferred_;
+    WritePlan plan_;
+    WriteSnapshot snapshot_;
+    TemplateArgument templateArg_;
+    zipio::ZipWriter::Compression compression_;
+    std::string outputPath_;
+    std::vector<uint8_t> out_;
+};
+
+Value WriteExcelAsync(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    WritePlan plan;
+    std::vector<ColumnSource> columnSources;
+    TemplateArgument templateArg;
+    Napi::Array rows;
+    Object options;
+    if (!readSheetWriteArguments(info, plan, columnSources, templateArg, rows, options)) {
+        return env.Null();
+    }
+
+    WriteSnapshot snapshot;
+    snapshotRows(env, rows, columnSources, snapshot);
+    if (hasPendingException(env)) {
+        return env.Null();
+    }
+
+    auto* worker = new WriteExcelWorker(env, std::move(plan), std::move(snapshot),
+                                        std::move(templateArg), readCompression(options),
+                                        readOutputPath(options));
+    const Napi::Promise promise = worker->Promise();
+    worker->Queue();
+    return promise;
+}
+
+class WriteCellsWorker : public Napi::AsyncWorker {
+public:
+    WriteCellsWorker(Napi::Env env, TemplateArgument templateArg, std::vector<CellUpdate> updates,
+                     zipio::ZipWriter::Compression compression, std::string outputPath)
+        : Napi::AsyncWorker(env),
+          deferred_(Napi::Promise::Deferred::New(env)),
+          templateArg_(std::move(templateArg)),
+          updates_(std::move(updates)),
+          compression_(compression),
+          outputPath_(std::move(outputPath)) {}
+
+    Napi::Promise Promise() { return deferred_.Promise(); }
+
+    void Execute() override {
+        BAJA_WORKER_GUARD(
+            std::string error;
+            if (!updateCells(templateArg_.source(), updates_, compression_, out_, error)) {
+                SetError(error.empty() ? "WRITE_FAILED|Failed to patch the workbook" : error);
+                return;
+            }
+            if (!outputPath_.empty() && !writeBytesToFile(outputPath_, out_, error)) {
+                SetError(error);
+            }
+        )
+    }
+
+    void OnOK() override {
+        Env env = Env();
+        if (outputPath_.empty()) {
+            deferred_.Resolve(Buffer<uint8_t>::Copy(env, out_.data(), out_.size()));
+            return;
+        }
+        Object summary = Object::New(env);
+        summary.Set("bytes", Number::New(env, static_cast<double>(out_.size())));
+        summary.Set("cells", Number::New(env, static_cast<double>(updates_.size())));
+        deferred_.Resolve(summary);
+    }
+
+    void OnError(const Napi::Error& e) override {
+        deferred_.Reject(makeCodedError(Env(), e.Message()).Value());
+    }
+
+private:
+    Napi::Promise::Deferred deferred_;
+    TemplateArgument templateArg_;
+    std::vector<CellUpdate> updates_;
+    zipio::ZipWriter::Compression compression_;
+    std::string outputPath_;
+    std::vector<uint8_t> out_;
+};
+
+Value WriteCellsAsync(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    if (info.Length() < 1 || !info[0].IsObject()) {
+        TypeError::New(env, "An options object is required").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    Object spec = info[0].As<Object>();
+
+    TemplateArgument templateArg;
+    if (!readTemplateArgument(spec, templateArg) || !templateArg.present) {
+        return failWith(env,
+                        "INVALID_OPTIONS|options.template is required (file path or Buffer)");
+    }
+
+    std::vector<CellUpdate> updates;
+    if (!readUpdateList(env, spec, updates)) {
+        return env.Null();
+    }
+
+    auto* worker = new WriteCellsWorker(env, std::move(templateArg), std::move(updates),
+                                        readCompression(spec), readOutputPath(spec));
+    const Napi::Promise promise = worker->Promise();
+    worker->Queue();
+    return promise;
+}
+
+class RenderTemplateWorker : public Napi::AsyncWorker {
+public:
+    RenderTemplateWorker(Napi::Env env, TemplateArgument templateArg, TemplateValues values,
+                         TemplatePlan plan, zipio::ZipWriter::Compression compression,
+                         std::string outputPath)
+        : Napi::AsyncWorker(env),
+          deferred_(Napi::Promise::Deferred::New(env)),
+          templateArg_(std::move(templateArg)),
+          values_(std::move(values)),
+          plan_(plan),
+          compression_(compression),
+          outputPath_(std::move(outputPath)) {}
+
+    Napi::Promise Promise() { return deferred_.Promise(); }
+
+    void Execute() override {
+        BAJA_WORKER_GUARD(
+            std::string error;
+            if (!renderTemplate(templateArg_.source(), values_, plan_, compression_, out_,
+                                sheets_, error)) {
+                SetError(error.empty() ? "WRITE_FAILED|Failed to render the template" : error);
+                return;
+            }
+            if (!outputPath_.empty() && !writeBytesToFile(outputPath_, out_, error)) {
+                SetError(error);
+            }
+        )
+    }
+
+    void OnOK() override {
+        Env env = Env();
+        if (outputPath_.empty()) {
+            deferred_.Resolve(Buffer<uint8_t>::Copy(env, out_.data(), out_.size()));
+            return;
+        }
+        Object summary = Object::New(env);
+        summary.Set("bytes", Number::New(env, static_cast<double>(out_.size())));
+        summary.Set("sheets", stringArray(env, sheets_));
+        deferred_.Resolve(summary);
+    }
+
+    void OnError(const Napi::Error& e) override {
+        deferred_.Reject(makeCodedError(Env(), e.Message()).Value());
+    }
+
+private:
+    Napi::Promise::Deferred deferred_;
+    TemplateArgument templateArg_;
+    TemplateValues values_;
+    TemplatePlan plan_;
+    zipio::ZipWriter::Compression compression_;
+    std::string outputPath_;
+    std::vector<uint8_t> out_;
+    std::vector<std::string> sheets_;
+};
+
+Value RenderTemplateAsync(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    if (info.Length() < 2 || !info[1].IsObject()) {
+        return failWith(env,
+                        "INVALID_OPTIONS|renderTemplate expects a template and a values object");
+    }
+
+    TemplateArgument templateArg;
+    if (!readTemplateValue(info[0], templateArg)) {
+        return failWith(env, "INVALID_OPTIONS|options.template is required (file path or Buffer)");
+    }
+
+    TemplateValues values;
+    readTemplateValues(info[1].As<Object>(), values);
+
+    Object options = (info.Length() > 2 && info[2].IsObject()) ? info[2].As<Object>()
+                                                               : Object::New(env);
+    auto* worker = new RenderTemplateWorker(env, std::move(templateArg), std::move(values),
+                                            readTemplatePlan(options), readCompression(options),
+                                            readOutputPath(options));
+    const Napi::Promise promise = worker->Promise();
+    worker->Queue();
+    return promise;
+}
+
+// ---------------------------------------------------------------------------
 // Init. The former native `extractImages` export is removed: it was a
 // placeholder that always returned [] silently (AUDIT-20260917-012).
 // ---------------------------------------------------------------------------
@@ -1152,6 +1496,9 @@ Object Init(Env env, Object exports) {
     exports.Set("writeExcel", Function::New(env, WriteExcel));
     exports.Set("writeCells", Function::New(env, WriteCells));
     exports.Set("renderTemplate", Function::New(env, RenderTemplate));
+    exports.Set("writeExcelAsync", Function::New(env, WriteExcelAsync));
+    exports.Set("writeCellsAsync", Function::New(env, WriteCellsAsync));
+    exports.Set("renderTemplateAsync", Function::New(env, RenderTemplateAsync));
     return exports;
 }
 

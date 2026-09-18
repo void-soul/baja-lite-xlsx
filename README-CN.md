@@ -228,6 +228,25 @@ const buffer = renderTemplate(
 重复的行。找不到值的标记会抛 `TEMPLATE_ERROR`（传 `strict: false` 则写为空串），
 `{{#each}}` 未闭合一定报错。
 
+### 异步写入
+
+三个写入函数都有异步孪生，返回值完全一致：
+
+```javascript
+const {
+  writeTableAsJSONAsync, updateCellsAsync, renderTemplateAsync
+} = require('baja-lite-xlsx');
+
+await writeTableAsJSONAsync(rows, { output: 'report.xlsx' }); // { bytes, rowCount, sheetName }
+const patched = await updateCellsAsync({ template, updates });
+const filled = await renderTemplateAsync(values, { template });
+```
+
+行 / 更新 / 值会先在调用线程上拷入一份紧凑的原生快照（数据在 JS 里，这一步无法
+移出），随后所有重活（工作表 XML、deflate、压缩包装配、写文件）都在 libuv 线程池
+执行。服务端或 Electron 主进程在生成大工作簿时仍能继续处理请求；失败时 reject 的
+错误码与同步调用抛出的完全一致。
+
 ## 性能
 
 读取过程只做你要求的那部分工作：

@@ -16,8 +16,11 @@ const {
   readTableAsJSON,
   readTableAsJSONAsync,
   writeTableAsJSON,
+  writeTableAsJSONAsync,
   updateCells,
-  renderTemplate
+  updateCellsAsync,
+  renderTemplate,
+  renderTemplateAsync
 } = require('..');
 
 const fixturesDir = path.join(__dirname, '..', 'examples');
@@ -532,6 +535,114 @@ test('bad render specs -> INVALID_OPTIONS', null, () => {
     () => renderTemplate({ a: [{ 'bad.key': 1 }] }, { template: 'x.xlsx' }),
     (err) => err.code === 'INVALID_OPTIONS'
   );
+});
+
+// ---------------------------------------------------------------------------
+// Write: asynchronous twins (rows are snapshotted, the work runs off-thread)
+// ---------------------------------------------------------------------------
+
+testAsync('writeTableAsJSONAsync matches the sync result', null, async () => {
+  const rows = [
+    { name: 'a', amount: 1, when: new Date(2026, 0, 15) },
+    { name: 'b', amount: 2.5, when: new Date(2026, 1, 1) }
+  ];
+  const options = {
+    sheetName: 'Async',
+    columns: {
+      name: {},
+      amount: { numberFormat: '#,##0.00' },
+      when: { numberFormat: 'yyyy-mm-dd' }
+    }
+  };
+  const sync = writeTableAsJSON(rows, options);
+  const asynchronous = await writeTableAsJSONAsync(rows, options);
+  assert.ok(Buffer.isBuffer(asynchronous), 'expected a Buffer');
+  assert.ok(sync.equals(asynchronous), 'async bytes must equal sync bytes');
+});
+
+testAsync('writeTableAsJSONAsync writes the file it is asked to', null, async () => {
+  ensureOutputDir();
+  const target = path.join(outputDir, 'async-write.xlsx');
+  if (fs.existsSync(target)) fs.unlinkSync(target);
+
+  const summary = await writeTableAsJSONAsync([{ a: 1, b: 'x' }], { output: target });
+  assert.ok(fs.existsSync(target));
+  assert.equal(summary.rowCount, 1);
+  assert.equal(summary.sheetName, 'Sheet1');
+  assert.deepEqual(readTableAsJSON(target), [{ a: '1', b: 'x' }]);
+});
+
+testAsync('writeTableAsJSONAsync rejects with a coded error', null, async () => {
+  await assert.rejects(
+    () => writeTableAsJSONAsync([{ a: 1 }], { template: 'no-such-file.xlsx' }),
+    (err) => err.code === 'FILE_OPEN_FAILED'
+  );
+  await assert.rejects(
+    () => writeTableAsJSONAsync('nope', {}),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+testAsync('updateCellsAsync matches the sync result', null, async () => {
+  ensureOutputDir();
+  const template = path.join(outputDir, 'async-cells.xlsx');
+  writeTableAsJSON([{ a: 1, b: 2 }], { output: template });
+
+  const spec = {
+    template,
+    updates: [
+      { cell: 'A1', value: 'patched' },
+      { cell: 'B1', value: 42.5, numberFormat: '#,##0.00' }
+    ]
+  };
+  const sync = updateCells(spec);
+  const asynchronous = await updateCellsAsync(spec);
+  assert.ok(sync.equals(asynchronous), 'async bytes must equal sync bytes');
+  assert.deepEqual(readTableAsJSON(asynchronous), readTableAsJSON(sync));
+});
+
+testAsync('renderTemplateAsync matches the sync result', null, async () => {
+  const template = makeTemplate([['label', 'name'], ['${title}', '${items.0.name}']], [{}, {}]);
+  const values = { title: 'async', items: [{ name: 'first' }] };
+
+  const sync = renderTemplate(values, { template });
+  const asynchronous = await renderTemplateAsync(values, { template });
+  assert.ok(sync.equals(asynchronous), 'async bytes must equal sync bytes');
+  assert.deepEqual(readTableAsJSON(asynchronous), [
+    { label: 'async', name: 'first' }
+  ]);
+
+  ensureOutputDir();
+  const target = path.join(outputDir, 'async-render.xlsx');
+  if (fs.existsSync(target)) fs.unlinkSync(target);
+  const summary = await renderTemplateAsync(values, { template, output: target });
+  assert.ok(fs.existsSync(target));
+  assert.ok(summary.bytes > 0);
+  assert.ok(Array.isArray(summary.sheets));
+
+  await assert.rejects(
+    () => renderTemplateAsync({}, { template }),
+    (err) => err.code === 'TEMPLATE_ERROR'
+  );
+});
+
+testAsync('a large async write keeps the event loop running', null, async () => {
+  const rows = [];
+  for (let i = 0; i < 20000; i++) {
+    rows.push({ id: i, name: `row ${i}`, amount: i * 1.5, flag: i % 2 === 0 });
+  }
+
+  let ticks = 0;
+  const timer = setInterval(() => { ticks += 1; }, 1);
+  try {
+    const buffer = await writeTableAsJSONAsync(rows, { sheetName: 'Big' });
+    assert.ok(Buffer.isBuffer(buffer));
+  } finally {
+    clearInterval(timer);
+  }
+  // The snapshot is built on the calling thread, but generation, deflate and
+  // assembly run in the thread pool -- the loop must have kept firing.
+  assert.ok(ticks > 0, `expected timers to fire during the write, got ${ticks}`);
 });
 
 // ---------------------------------------------------------------------------

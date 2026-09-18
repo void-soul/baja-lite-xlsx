@@ -243,6 +243,27 @@ carries data cells is the first repeated row. A marker with no matching value
 throws `TEMPLATE_ERROR` (pass `strict: false` to write an empty string instead),
 and an unclosed `{{#each}}` always throws.
 
+### Asynchronous writes
+
+Every write has an async twin that resolves to the same value:
+
+```javascript
+const {
+  writeTableAsJSONAsync, updateCellsAsync, renderTemplateAsync
+} = require('baja-lite-xlsx');
+
+await writeTableAsJSONAsync(rows, { output: 'report.xlsx' }); // { bytes, rowCount, sheetName }
+const patched = await updateCellsAsync({ template, updates });
+const filled = await renderTemplateAsync(values, { template });
+```
+
+The rows / updates / values are copied into a compact native snapshot on the
+calling thread — the data lives in JS, so that step cannot move off it — and
+everything expensive (worksheet XML, deflate, package assembly, the file write)
+then runs on the libuv thread pool. A server or an Electron main process keeps
+serving requests while a large workbook is produced, and failures reject with
+the same `code` the synchronous call throws.
+
 ## Performance
 
 The reader only does work you asked for:

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 (2026-09-18) — asynchronous writes
+
+- `writeTableAsJSONAsync`, `updateCellsAsync`, `renderTemplateAsync`: the JS
+  input is copied into a compact native snapshot (identical strings interned
+  once, 16 bytes per cell) and the whole build — worksheet XML, deflate, package
+  assembly and the file write — then runs on the libuv thread pool, so the event
+  loop keeps running. Same options, same results, same error codes.
+- The sync and async entry points now share their C++ helpers (option parsing,
+  update list, template spec, file write), so the two paths cannot drift apart.
+
 ## 1.3.0 (2026-09-18) — template rendering
 
 New: `renderTemplate(values, options)` — fill a template workbook.
