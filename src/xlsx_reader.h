@@ -10,6 +10,8 @@
 
 #include "sheet_types.h"
 
+namespace baja_xlsx {
+
 class XlsxReader {
 public:
     XlsxReader();
