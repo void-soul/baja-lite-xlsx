@@ -4,7 +4,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
 #include <list>
 #include <map>
 #include <memory>
@@ -798,33 +797,34 @@ bool buildTemplateStructure(zip_t* archive, const TemplatePlan& plan, CachedTemp
 // Template cache
 // ---------------------------------------------------------------------------
 
-// A path is identified by its size and modification time, so rewriting the file
-// drops the entry; bytes are identified by size plus a content hash. Rendering
-// with a different sheet filter is a different structure, hence the suffix.
-std::string templateIdentity(const TemplateSource& source, const std::string& sheetFilter) {
-    std::string key;
-    if (source.path) {
-        key = "path:" + *source.path;
-        std::error_code code;
-        const std::uintmax_t size = std::filesystem::file_size(*source.path, code);
-        if (!code) {
-            key += ":" + std::to_string(size);
-            const auto stamp = std::filesystem::last_write_time(*source.path, code);
-            if (!code) {
-                key += ":" + std::to_string(stamp.time_since_epoch().count());
-            }
-        }
-    } else if (source.bytes) {
-        // FNV-1a: cheap, and the template is already in memory.
-        uint64_t hash = 1469598103934665603ull;
-        for (uint8_t byte : *source.bytes) {
-            hash = (hash ^ byte) * 1099511628211ull;
-        }
-        key = "bytes:" + std::to_string(source.bytes->size()) + ":" + std::to_string(hash);
-    } else {
-        return std::string();
-    }
+// Identity comes from the archive's central directory -- entry names, sizes and
+// CRC32s -- so it is content based instead of timestamp based (a rewritten
+// template is always noticed) and needs no stat, which keeps it portable. The
+// scan touches no entry data, only the directory.
+std::string archiveIdentity(zip_t* archive) {
+    uint64_t hash = 1469598103934665603ull; // FNV-1a
+    const auto mix = [&hash](uint64_t value) { hash = (hash ^ value) * 1099511628211ull; };
 
+    const zip_int64_t count = zip_get_num_entries(archive, 0);
+    mix(static_cast<uint64_t>(count));
+    for (zip_int64_t i = 0; i < count; ++i) {
+        zip_stat_t info;
+        zip_stat_init(&info);
+        if (zip_stat_index(archive, i, 0, &info) != 0) continue;
+
+        const std::string name = info.name ? pkg::normalizeName(info.name) : std::string();
+        for (char c : name) {
+            mix(static_cast<unsigned char>(c));
+        }
+        mix(static_cast<uint64_t>(info.size));
+        mix(static_cast<uint64_t>(info.crc));
+    }
+    return std::to_string(hash);
+}
+
+// Rendering with a different sheet filter parses a different structure.
+std::string cacheKey(zip_t* archive, const std::string& sheetFilter) {
+    std::string key = archiveIdentity(archive);
     if (!sheetFilter.empty()) {
         key += "|sheet:" + sheetFilter;
     }
@@ -897,16 +897,19 @@ bool renderTemplate(const TemplateSource& source, const TemplateValues& values,
                     const TemplatePlan& plan, zipio::ZipWriter::Compression compression,
                     std::vector<uint8_t>& out, std::vector<std::string>& renderedSheets,
                     std::string& error) {
-    const std::string key = plan.cache ? templateIdentity(source, plan.sheetName) : std::string();
-    std::shared_ptr<const CachedTemplate> structure;
-    if (!key.empty()) {
-        structure = templateCache().get(key);
-    }
-
     renderedSheets.clear();
     zip_t* archive = nullptr;
     if (!pkg::openTemplate(source, archive, error)) return false;
     pkg::ArchiveCloser closer(archive);
+
+    // The archive is opened in both cases -- assembly needs it to copy the
+    // untouched parts -- so the identity is cheap to compute here, and a cache
+    // hit skips reading and scanning every sheet.
+    const std::string key = plan.cache ? cacheKey(archive, plan.sheetName) : std::string();
+    std::shared_ptr<const CachedTemplate> structure;
+    if (!key.empty()) {
+        structure = templateCache().get(key);
+    }
 
     if (!structure) {
         auto built = std::make_shared<CachedTemplate>();

@@ -240,8 +240,8 @@ const filled = await renderTemplateAsync(values, { template, cache: true });
 
 解析后的模板结构（行布局、标记位置、sharedStrings 表）会留在进程内**有界缓存**中
 （最多 8 个模板 / 64 MB，LRU 淘汰），重复渲染因而完全跳过模板的读取与扫描。缓存键为
-模板身份（路径 + 大小 + mtime，Buffer 则用内容哈希）加表名过滤，因此模板被改写会
-自动失效。默认 `false`。
+模板身份（压缩包中央目录的条目名、大小与 CRC）加表名过滤，因此模板被改写一定会被
+识别。默认 `false`。
 
 ### 异步写入
 

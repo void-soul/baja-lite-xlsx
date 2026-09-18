@@ -34,8 +34,8 @@ struct TemplatePlan {
     // Keep the parsed template structure (row layout, marker positions, shared
     // string table) in a bounded in-process cache. A report server that renders
     // the same template repeatedly then skips reading and scanning it entirely;
-    // the cache is keyed by the template's identity (path + size + mtime, or a
-    // content hash for bytes) and by the sheet filter.
+    // the cache is keyed by the archive's central directory (names, sizes, CRCs)
+    // and by the sheet filter, so a rewritten template is always noticed.
     bool cache = false;
 };
 

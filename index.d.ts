@@ -304,8 +304,8 @@ declare module 'baja-lite-xlsx' {
      * Keep the parsed template structure (row layout, marker positions, shared
      * strings) in a bounded in-process cache — useful when the same template is
      * rendered repeatedly, as in a report server. Entries are keyed by the
-     * template's identity (path + size + mtime, or a content hash for Buffers)
-     * plus the sheet filter, so a rewritten template is picked up automatically.
+     * template's identity (its zip central directory: entry names, sizes and
+     * CRCs) plus the sheet filter, so a rewritten template is always picked up.
      * The cache holds at most 8 templates / 64 MB. Default: false.
      */
     cache?: boolean;

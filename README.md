@@ -256,9 +256,9 @@ const filled = await renderTemplateAsync(values, { template, cache: true });
 The parsed template structure — row layout, marker positions and the shared
 string table — is kept in a bounded in-process cache (8 templates / 64 MB, LRU),
 so a repeat render skips reading and scanning the template altogether. Entries
-are keyed by the template's identity (path + size + mtime, or a content hash for
-Buffers) plus the sheet filter, so a rewritten template is picked up
-automatically. Default: `false`.
+are keyed by the template's identity (its zip central directory: entry names,
+sizes and CRCs) plus the sheet filter, so a rewritten template is always picked
+up. Default: `false`.
 
 ### Asynchronous writes
 

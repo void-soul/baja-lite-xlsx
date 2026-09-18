@@ -18,9 +18,10 @@ New:
 
 - `renderTemplate(values, { cache: true })`: the parsed template structure (row
   layout, marker positions, shared strings) stays in a bounded in-process LRU
-  cache (8 entries / 64 MB) keyed by template identity plus the sheet filter, so
-  a repeat render skips reading and scanning the template. Mutex-protected, so
-  the async twin benefits as well.
+  cache (8 entries / 64 MB), so a repeat render skips reading and scanning the
+  template. Entries are keyed by the archive's central directory (entry names,
+  sizes and CRCs) plus the sheet filter, so a rewritten template is always
+  picked up; the cache is mutex-protected, so the async twin benefits as well.
 - `bench/` now also measures the write side (`--rows` to size the workload):
   sync/async sheet writes, writing to a file, cell patching, and template
   rendering with and without the cache.
