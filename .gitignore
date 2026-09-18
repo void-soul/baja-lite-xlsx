@@ -23,6 +23,10 @@ Thumbs.db
 # Test outputs
 test/output/
 
+# Local install-and-run sandbox for released packages (scripts plus a
+# node_modules tree; never part of the repository).
+.smoke/
+
 # Local-only working documents (audit reports, scratch notes).
 # Design docs under docs/plans are part of the repository.
 docs/*
