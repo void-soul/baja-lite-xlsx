@@ -16,7 +16,7 @@ async function main() {
   }
 
   // 1. Read caps: truncate huge sheets deterministically.
-  const capped = readTableAsJSON(excelFile, { maxRows: 1000, maxCols: 50 });
+  const capped = await readTableAsJSON(excelFile, { maxRows: 1000, maxCols: 50 });
   console.log(`Capped read: ${capped.length} rows`);
 
   // 2. Diagnostics: collect warnings for unattached images etc.

@@ -1,42 +1,61 @@
 /**
  * TypeScript usage example for baja-lite-xlsx.
- * Types come from index.d.ts.
+ * Types come from index.d.ts; every entry point is async.
  */
 
-import { readTableAsJSON, readTableAsJSON, ImageDataObject } from 'baja-lite-xlsx';
+import { readTableAsJSON, writeTableAsJSON, updateCells, ImageDataObject } from 'baja-lite-xlsx';
 import * as fs from 'fs';
 
-interface UserRow {
-  [key: string]: string | ImageDataObject | ImageDataObject[];
+type CellValue = string | number | boolean | Date | ImageDataObject | ImageDataObject[];
+type Row = Record<string, CellValue>;
+
+function isImage(value: CellValue): value is ImageDataObject {
+  return !!value && typeof value === 'object' && !Array.isArray(value) &&
+    Buffer.isBuffer((value as ImageDataObject).data);
 }
 
-function isImage(v: string | ImageDataObject | ImageDataObject[] | undefined): v is ImageDataObject {
-  return !!v && typeof v === 'object' && !Array.isArray(v) && Buffer.isBuffer((v as ImageDataObject).data);
-}
-
-// Synchronous read
-const rows = readTableAsJSON('./sample.xlsx') as UserRow[];
-console.log(`Rows: ${rows.length}`);
-
-// Async read with diagnostics
 async function main(): Promise<void> {
-  const { rows, warnings } = (await readTableAsJSON('./sample.xlsx', {
+  // 1. Read: the overload with includeWarnings gives { rows, warnings }.
+  const { rows, warnings } = await readTableAsJSON('./sample.xlsx', {
     sheetName: 'Sheet1',
     headerRow: 0,
     includeWarnings: true
-  })) as { rows: UserRow[]; warnings: string[] };
+  });
+  console.log(`Rows: ${rows.length}`);
 
-  rows.forEach((row, i) => {
+  rows.forEach((row: Row, i: number) => {
     for (const [key, value] of Object.entries(row)) {
       if (isImage(value)) {
         console.log(`Row ${i + 1} [${key}]: image ${value.name} (${value.data.length} bytes)`);
       }
     }
   });
-
   if (warnings.length > 0) {
     console.warn('Warnings:', warnings);
   }
+
+  // 2. Typed read: real numbers / booleans / Dates instead of strings.
+  const typed = await readTableAsJSON('./sample.xlsx', {
+    engine: 'xml',
+    values: 'typed',
+    columns: ['amount']
+  });
+  console.log(`Typed rows: ${typed.length}`);
+
+  // 3. Write, then chain: the Buffer from one call feeds the next as sourceFile.
+  const bytes: Buffer = await writeTableAsJSON(rows, { sheetName: 'Data' });
+  const appended: Buffer = await writeTableAsJSON([{ note: 'appended' }], {
+    sourceFile: bytes,
+    sheetName: 'Data',
+    columns: { note: { header: 'Note' } }
+  });
+
+  // 4. Patch single cells of the Buffer produced above.
+  const patched: Buffer = await updateCells({
+    sourceFile: appended,
+    updates: [{ cell: 'B2', value: 1234.5, numberFormat: '#,##0.00' }]
+  });
+  fs.writeFileSync('./out.xlsx', patched);
 }
 
 main().catch((err: NodeJS.ErrnoException) => {

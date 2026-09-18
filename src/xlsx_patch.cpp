@@ -672,7 +672,6 @@ bool replaceSheetData(const TemplateSource& source, const WritePlan& plan, RowSo
     if (!readEntry(archive, part, sheetXml, error)) return false;
 
     const size_t sheetDataStart = xmlp::findTagOpen(sheetXml, "sheetData", 0);
-    { std::printf("[dbg] A2\n"); std::fflush(stdout); }
     if (sheetDataStart == std::string::npos) {
         error = "WRITE_FAILED|Sheet '" + plan.sheetName + "' has no sheetData element";
         return false;
@@ -1007,7 +1006,6 @@ bool appendRows(const TemplateSource& source, const WritePlan& plan, RowSource& 
     }
 
     // Styles: appended rows may need number formats the template does not have.
-    { std::printf("[dbg] A3\n"); std::fflush(stdout); }
     TemplateStyleBase base;
     std::string stylesXml;
     if (!readTemplateStyleBase(archive, base, stylesXml, error)) return false;

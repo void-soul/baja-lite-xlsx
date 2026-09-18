@@ -25,8 +25,9 @@ jobs:
           done
       - name: Typecheck declarations
         # @types/node comes from devDependencies. "-p" is required: bare
-        # "npx typescript@5 tsc" cannot resolve the tsc binary.
-        run: npx --yes -p typescript@5 tsc --noEmit --skipLibCheck --types node index.d.ts
+        # "npx typescript@5 tsc" cannot resolve the tsc binary. The TypeScript
+        # example is compiled too, so it cannot drift from the API.
+        run: npx --yes -p typescript@5 tsc --noEmit --skipLibCheck --types node index.d.ts examples/typescript-example.ts
 
   build-test:
     name: Build & test (windows)
@@ -66,6 +67,9 @@ jobs:
           status=$?
           grep -E "^FAIL" test-output.log | head -20 | while IFS= read -r line; do
             echo "::error::$line"
+          done
+          grep -E "^(PASS|FAIL)" test-output.log | tail -8 | while IFS= read -r line; do
+            echo "::error::tail ${line:0:120}"
           done
           tail -30 test-output.log
           exit $status
