@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.0 (2026-09-18) — writing into existing workbooks
+
+- `writeTableAsJSON(rows, { template })`: writes into an existing workbook,
+  replacing the target sheet's data. Only that sheet (and `styles.xml` when new
+  number formats are needed) is regenerated; every other entry is copied as
+  compressed bytes, so other sheets, images, themes and document properties
+  survive untouched.
+- `updateCells({ template, updates, output })`: rewrites individual cells
+  (`{ sheet?, cell, value?, numberFormat? }`). The sheet is patched in place —
+  existing cell styles are kept, formulas in the patched cell are dropped
+  rather than left stale, and missing cells/rows are inserted in the correct
+  order. Untouched cells, other sheets and every other part stay byte-identical.
+- Sheet part lookup resolves `workbook.xml` relationships to the real part and
+  tolerates packages whose targets are relative in unusual ways.
+
 ## 1.1.0 (2026-09-18) — writing
 
 New: `writeTableAsJSON(rows, options)` — a JSON array becomes a worksheet.

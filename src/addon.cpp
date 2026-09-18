@@ -1,5 +1,6 @@
 #include <napi.h>
 #include "path_util.h"
+#include "xlsx_patch.h"
 #include "xlsx_reader.h"
 #include "xlsx_writer.h"
 
@@ -710,6 +711,82 @@ struct ColumnSource {
     uint32_t index = 0;
 };
 
+// The workbook a write starts from: a path or an in-memory package.
+struct TemplateArgument {
+    bool present = false;
+    std::string path;
+    std::vector<uint8_t> bytes;
+
+    TemplateSource source() const {
+        TemplateSource out;
+        if (!path.empty()) {
+            out.path = &path;
+        } else if (present) {
+            out.bytes = &bytes;
+        }
+        return out;
+    }
+};
+
+bool readTemplateArgument(const Object& options, TemplateArgument& out) {
+    if (!options.Has("template")) return true;
+    const Value value = options.Get("template");
+    if (value.IsUndefined() || value.IsNull()) return true;
+    if (value.IsString()) {
+        out.present = true;
+        out.path = value.As<String>().Utf8Value();
+        return true;
+    }
+    if (value.IsBuffer()) {
+        out.present = true;
+        Buffer<uint8_t> buffer = value.As<Buffer<uint8_t>>();
+        out.bytes.assign(buffer.Data(), buffer.Data() + buffer.Length());
+        return true;
+    }
+    return false; // caller reports INVALID_OPTIONS
+}
+
+zipio::ZipWriter::Compression readCompression(const Object& options) {
+    zipio::ZipWriter::Compression compression = zipio::ZipWriter::Compression::Default;
+    if (options.Has("compression")) {
+        const Value value = options.Get("compression");
+        if (value.IsNumber()) {
+            const int level = value.As<Number>().Int32Value();
+            compression = level <= 0 ? zipio::ZipWriter::Compression::Store
+                                     : (level <= 3 ? zipio::ZipWriter::Compression::Fast
+                                                   : zipio::ZipWriter::Compression::Default);
+        }
+    }
+    return compression;
+}
+
+std::string readOutputPath(const Object& options) {
+    if (!options.Has("output")) return std::string();
+    const Value value = options.Get("output");
+    return value.IsString() ? value.As<String>().Utf8Value() : std::string();
+}
+
+// Writes the assembled package to `path`, or hands it back as a Buffer.
+Value finishWrite(Env env, const std::vector<uint8_t>& out, const std::string& outputPath,
+                  Object summary) {
+    if (outputPath.empty()) {
+        return Buffer<uint8_t>::Copy(env, out.data(), out.size());
+    }
+
+    std::FILE* file = pathutil::openForWrite(outputPath);
+    if (!file) {
+        return failWith(env, "FILE_WRITE_FAILED|Cannot create " + outputPath);
+    }
+    const size_t written = out.empty() ? 0 : std::fwrite(out.data(), 1, out.size(), file);
+    std::fclose(file);
+    if (written != out.size()) {
+        return failWith(env, "FILE_WRITE_FAILED|Failed to write " + outputPath);
+    }
+
+    summary.Set("bytes", Number::New(env, static_cast<double>(out.size())));
+    return summary;
+}
+
 WriteCell toWriteCell(const Value& value) {
     WriteCell cell;
     if (value.IsEmpty() || value.IsUndefined() || value.IsNull()) {
@@ -808,8 +885,6 @@ Value WriteExcel(const CallbackInfo& info) {
 
     WritePlan plan;
     std::vector<ColumnSource> columnSources;
-    std::string outputPath;
-    zipio::ZipWriter::Compression compression = zipio::ZipWriter::Compression::Default;
 
     if (options.Has("sheetName")) {
         Value value = options.Get("sheetName");
@@ -827,21 +902,6 @@ Value WriteExcel(const CallbackInfo& info) {
         Value value = options.Get("freezeHeader");
         if (value.IsBoolean()) {
             plan.freezeHeader = value.As<Boolean>().Value();
-        }
-    }
-    if (options.Has("output")) {
-        Value value = options.Get("output");
-        if (value.IsString()) {
-            outputPath = value.As<String>().Utf8Value();
-        }
-    }
-    if (options.Has("compression")) {
-        Value value = options.Get("compression");
-        if (value.IsNumber()) {
-            const int level = value.As<Number>().Int32Value();
-            compression = level <= 0 ? zipio::ZipWriter::Compression::Store
-                                     : (level <= 3 ? zipio::ZipWriter::Compression::Fast
-                                                   : zipio::ZipWriter::Compression::Default);
         }
     }
     if (options.Has("columns")) {
@@ -894,35 +954,102 @@ Value WriteExcel(const CallbackInfo& info) {
         }
     }
 
+    TemplateArgument templateArg;
+    if (!readTemplateArgument(options, templateArg)) {
+        return failWith(env, "INVALID_OPTIONS|options.template must be a file path or a Buffer");
+    }
+    if (!options.Has("sheetName")) {
+        // A new workbook gets the default name; a template keeps its first sheet
+        // unless the caller names one.
+        plan.sheetName = templateArg.present ? std::string() : std::string("Sheet1");
+    }
+
     JsRowSource source(env, rows, std::move(columnSources));
     std::vector<uint8_t> out;
     std::string error;
-    if (!writeNewWorkbook(plan, source, compression, out, error)) {
+    const bool ok = templateArg.present
+        ? replaceSheetData(templateArg.source(), plan, source, readCompression(options), out, error)
+        : writeNewWorkbook(plan, source, readCompression(options), out, error);
+    if (!ok) {
         return failWith(env, error.empty() ? "WRITE_FAILED|Failed to build the workbook" : error);
     }
     if (hasPendingException(env)) {
         return env.Null();
     }
 
-    if (!outputPath.empty()) {
-        std::FILE* file = pathutil::openForWrite(outputPath);
-        if (!file) {
-            return failWith(env, "FILE_WRITE_FAILED|Cannot create " + outputPath);
-        }
-        const size_t written = out.empty() ? 0 : std::fwrite(out.data(), 1, out.size(), file);
-        std::fclose(file);
-        if (written != out.size()) {
-            return failWith(env, "FILE_WRITE_FAILED|Failed to write " + outputPath);
-        }
+    Object summary = Object::New(env);
+    summary.Set("rowCount", Number::New(env, static_cast<double>(rows.Length())));
+    summary.Set("sheetName", String::New(env, plan.sheetName));
+    return finishWrite(env, out, readOutputPath(options), summary);
+}
 
-        Object result = Object::New(env);
-        result.Set("bytes", Number::New(env, static_cast<double>(out.size())));
-        result.Set("rowCount", Number::New(env, static_cast<double>(rows.Length())));
-        result.Set("sheetName", String::New(env, plan.sheetName));
-        return result;
+// ---------------------------------------------------------------------------
+// Writing: patch individual cells of an existing workbook (mode 2).
+// ---------------------------------------------------------------------------
+
+Value WriteCells(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    if (info.Length() < 1 || !info[0].IsObject()) {
+        TypeError::New(env, "An options object is required").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    Object spec = info[0].As<Object>();
+
+    TemplateArgument templateArg;
+    if (!readTemplateArgument(spec, templateArg) || !templateArg.present) {
+        return failWith(env,
+                        "INVALID_OPTIONS|options.template is required (file path or Buffer)");
+    }
+    if (!spec.Has("updates") || !spec.Get("updates").IsArray()) {
+        return failWith(env, "INVALID_OPTIONS|options.updates must be an array");
     }
 
-    return Buffer<uint8_t>::Copy(env, out.data(), out.size());
+    std::vector<CellUpdate> updates;
+    Array items = spec.Get("updates").As<Array>();
+    const uint32_t count = items.Length();
+    updates.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const Value item = items.Get(i);
+        if (!item.IsObject()) {
+            return failWith(env, "INVALID_OPTIONS|options.updates[" + std::to_string(i) +
+                                     "] must be an object");
+        }
+        Object entry = item.As<Object>();
+
+        CellUpdate update;
+        if (entry.Has("sheet")) {
+            const Value value = entry.Get("sheet");
+            if (value.IsString()) update.sheet = value.As<String>().Utf8Value();
+        }
+        if (entry.Has("cell")) {
+            const Value value = entry.Get("cell");
+            if (value.IsString()) update.cell = value.As<String>().Utf8Value();
+        }
+        if (update.cell.empty()) {
+            return failWith(env, "INVALID_OPTIONS|options.updates[" + std::to_string(i) +
+                                     "].cell is required");
+        }
+        if (entry.Has("numberFormat")) {
+            const Value value = entry.Get("numberFormat");
+            if (value.IsString()) update.numberFormat = value.As<String>().Utf8Value();
+        }
+        update.value = toWriteCell(entry.Has("value") ? entry.Get("value") : env.Null());
+        updates.push_back(std::move(update));
+    }
+
+    std::vector<uint8_t> out;
+    std::string error;
+    if (!updateCells(templateArg.source(), updates, readCompression(spec), out, error)) {
+        return failWith(env, error.empty() ? "WRITE_FAILED|Failed to patch the workbook" : error);
+    }
+    if (hasPendingException(env)) {
+        return env.Null();
+    }
+
+    Object summary = Object::New(env);
+    summary.Set("cells", Number::New(env, static_cast<double>(updates.size())));
+    return finishWrite(env, out, readOutputPath(spec), summary);
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +1063,7 @@ Object Init(Env env, Object exports) {
     exports.Set("readExcelBatched", Function::New(env, ReadExcelBatched));
     exports.Set("readExcelBatchedAsync", Function::New(env, ReadExcelBatchedAsync));
     exports.Set("writeExcel", Function::New(env, WriteExcel));
+    exports.Set("writeCells", Function::New(env, WriteCells));
     return exports;
 }
 

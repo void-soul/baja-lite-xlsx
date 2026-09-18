@@ -12,7 +12,12 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const { readTableAsJSON, readTableAsJSONAsync, writeTableAsJSON } = require('..');
+const {
+  readTableAsJSON,
+  readTableAsJSONAsync,
+  writeTableAsJSON,
+  updateCells
+} = require('..');
 
 const fixturesDir = path.join(__dirname, '..', 'examples');
 const FIXTURES = {
@@ -300,6 +305,109 @@ test('bad write specs -> INVALID_OPTIONS', null, () => {
   assert.throws(() => writeTableAsJSON([], {}), (err) => err.code === 'INVALID_OPTIONS');
   assert.throws(() => writeTableAsJSON([{ a: 1 }], { columns: 5 }), (err) => err.code === 'INVALID_OPTIONS');
   assert.throws(() => writeTableAsJSON([{ a: 1 }], { sheetName: 7 }), (err) => err.code === 'INVALID_OPTIONS');
+});
+
+// ---------------------------------------------------------------------------
+// Write: template workbook (mode 1b) and cell patching (mode 2)
+// ---------------------------------------------------------------------------
+
+test('writeTableAsJSON with a template replaces the sheet data', 'sample', (fixture) => {
+  const buffer = writeTableAsJSON([{ alpha: 'x', beta: 42 }], { template: fixture });
+  assert.ok(Buffer.isBuffer(buffer));
+  assert.deepEqual(readTableAsJSON(buffer), [{ alpha: 'x', beta: '42' }]);
+});
+
+test('a Buffer works as the template', 'sample', (fixture) => {
+  const bytes = fs.readFileSync(fixture);
+  const buffer = writeTableAsJSON([{ a: 1 }], { template: bytes });
+  assert.deepEqual(readTableAsJSON(buffer), [{ a: '1' }]);
+});
+
+test('updateCells rewrites one cell and leaves the rest alone', 'sample', (fixture) => {
+  const before = readTableAsJSON(fixture);
+  assert.ok(before.length > 0, 'fixture needs at least one data row');
+  const keys = Object.keys(before[0]);
+  assert.ok(keys.length > 0, 'fixture needs at least one column');
+
+  const buffer = updateCells({ template: fixture, updates: [{ cell: 'A2', value: 'REPLACED' }] });
+  const after = readTableAsJSON(buffer);
+
+  assert.equal(after.length, before.length, 'row count must not change');
+  assert.equal(after[0][keys[0]], 'REPLACED');
+  if (keys.length > 1) {
+    assert.equal(after[0][keys[1]], before[0][keys[1]], 'other cells must stay untouched');
+  }
+});
+
+test('updateCells writes numbers as numbers', 'sample', (fixture) => {
+  const buffer = updateCells({ template: fixture, updates: [{ cell: 'A2', value: 1234.5 }] });
+  const after = readTableAsJSON(buffer);
+  assert.equal(after[0][Object.keys(after[0])[0]], '1234.5');
+});
+
+test('updateCells applies a number format when asked', 'sample', (fixture) => {
+  const buffer = updateCells({
+    template: fixture,
+    updates: [{ cell: 'A2', value: 0.25, numberFormat: '0.00%' }]
+  });
+  const after = readTableAsJSON(buffer);
+  assert.equal(after[0][Object.keys(after[0])[0]], '0.25');
+});
+
+test('updateCells writes a date with an automatic format', 'sample', (fixture) => {
+  const buffer = updateCells({
+    template: fixture,
+    updates: [{ cell: 'A2', value: new Date(2026, 0, 15) }]
+  });
+  const after = readTableAsJSON(buffer);
+  assert.equal(after[0][Object.keys(after[0])[0]], '2026-01-15');
+});
+
+test('updateCells can clear a cell', 'sample', (fixture) => {
+  const buffer = updateCells({ template: fixture, updates: [{ cell: 'A2', value: null }] });
+  const after = readTableAsJSON(buffer);
+  assert.equal(after[0][Object.keys(after[0])[0]], '');
+});
+
+test('updateCells writes to a file when asked', 'sample', (fixture) => {
+  ensureOutputDir();
+  const target = path.join(outputDir, 'patched.xlsx');
+  if (fs.existsSync(target)) fs.unlinkSync(target);
+  const summary = updateCells({
+    template: fixture,
+    updates: [{ cell: 'A2', value: 'FILE' }],
+    output: target
+  });
+  assert.ok(fs.existsSync(target));
+  assert.equal(summary.cells, 1);
+  assert.ok(summary.bytes > 0);
+  assert.equal(readTableAsJSON(target)[0][Object.keys(readTableAsJSON(target)[0])[0]], 'FILE');
+});
+
+test('bad update specs -> INVALID_OPTIONS', null, () => {
+  assert.throws(
+    () => updateCells({ updates: [{ cell: 'A1', value: 1 }] }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+  assert.throws(
+    () => updateCells({ template: 'x.xlsx', updates: [] }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+  assert.throws(
+    () => updateCells({ template: 'x.xlsx', updates: [{ value: 1 }] }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+test('a missing template reports a coded error', null, () => {
+  assert.throws(
+    () => updateCells({ template: 'definitely-not-here-77.xlsx', updates: [{ cell: 'A1', value: 1 }] }),
+    (err) => err.code === 'FILE_OPEN_FAILED' || err.code === 'FILE_NOT_FOUND'
+  );
+  assert.throws(
+    () => writeTableAsJSON([{ a: 1 }], { template: 'definitely-not-here-88.xlsx' }),
+    (err) => err.code === 'FILE_OPEN_FAILED' || err.code === 'FILE_NOT_FOUND'
+  );
 });
 
 // ---------------------------------------------------------------------------

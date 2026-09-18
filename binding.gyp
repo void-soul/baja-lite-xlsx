@@ -10,6 +10,7 @@
         "src/addon.cpp",
         "src/xlsx_reader.cpp",
         "src/xlsx_writer.cpp",
+        "src/xlsx_patch.cpp",
         "src/image_extractor.cpp",
         "src/path_util.cpp",
         "src/zip_reader.cpp",

@@ -180,6 +180,14 @@ declare module 'baja-lite-xlsx' {
      * When omitted, columns come from the keys of the first row object.
      */
     columns?: Record<string, WriteColumnOptions> | WriteColumnOptions[];
+
+    /**
+     * Existing workbook to write into (path or bytes). Only the target sheet's
+     * data is replaced and every other part is copied byte for byte, so other
+     * sheets, images and styles survive unchanged. Without it a new workbook is
+     * created.
+     */
+    template?: string | Buffer;
   }
 
   /** Summary returned when `output` was written by the native layer. */
@@ -210,4 +218,49 @@ declare module 'baja-lite-xlsx' {
     rows: Array<Record<string, unknown>> | unknown[][],
     options?: WriteTableOptions
   ): Buffer;
+
+  /** One cell rewrite for `updateCells`. */
+  export interface CellUpdate {
+    /** Worksheet to patch; defaults to the first sheet. */
+    sheet?: string;
+    /** A1-style reference, e.g. "B7". */
+    cell: string;
+    /** New value: string, number, boolean, Date, or null/undefined to clear. */
+    value?: unknown;
+    /** Number format to apply, e.g. "#,##0.00" or "yyyy-mm-dd". */
+    numberFormat?: string;
+  }
+
+  export interface UpdateCellsOptions {
+    /** Workbook to patch (path or bytes). */
+    template: string | Buffer;
+    /** Cells to rewrite. Everything else is copied verbatim. */
+    updates: CellUpdate[];
+    /** Write the file natively instead of returning a Buffer. */
+    output?: string;
+    /** Compression level: 0 (store) .. 9 (maximum). Default: 6. */
+    compression?: number;
+  }
+
+  /** Summary returned when `output` was written by the native layer. */
+  export interface UpdateCellsResult {
+    /** Size of the written package in bytes. */
+    bytes: number;
+    /** Number of cells that were rewritten. */
+    cells: number;
+  }
+
+  /**
+   * Rewrites individual cells of an existing workbook.
+   *
+   * Only the affected worksheets are regenerated and every other part of the
+   * package is copied byte for byte, so untouched sheets, images and styles
+   * survive exactly as they were. A cell keeps its existing style unless the
+   * update supplies a `numberFormat`.
+   *
+   * @throws Error with a `code` property: INVALID_OPTIONS / FILE_OPEN_FAILED /
+   *   SHEET_NOT_FOUND / FILE_WRITE_FAILED / WRITE_FAILED.
+   */
+  export function updateCells(options: UpdateCellsOptions & { output: string }): UpdateCellsResult;
+  export function updateCells(options: UpdateCellsOptions): Buffer;
 }

@@ -169,6 +169,51 @@ Every thrown error carries a machine-readable `code`:
 - `maxRows` / `maxCols` limit how much of a sheet is materialized.
 - Truncation is always reported as a warning, never silently applied.
 
+## Writing
+
+### Create a workbook from JSON
+
+```javascript
+const { writeTableAsJSON, updateCells } = require('baja-lite-xlsx');
+
+// => Buffer
+const bytes = writeTableAsJSON(rows, { sheetName: 'Data' });
+fs.writeFileSync('out.xlsx', bytes);
+
+// Or let the native layer write the file: => { bytes, rowCount, sheetName }
+writeTableAsJSON(rows, {
+  output: 'out.xlsx',
+  columns: { amount: { header: 'Amount', numberFormat: '#,##0.00', width: 14 } }
+});
+```
+
+Numbers stay numbers, booleans stay booleans and `Date` values become real Excel
+dates with an automatic date format, so everything stays computable in Excel
+instead of turning into text.
+
+### Write into an existing workbook
+
+```javascript
+// Replace the target sheet's data and keep the rest of the workbook untouched:
+// other sheets, images, themes and styles are copied byte for byte.
+const buffer = writeTableAsJSON(rows, { template: 'template.xlsx' });
+
+// Rewrite individual cells: => Buffer, or { bytes, cells } when output is given
+const patched = updateCells({
+  template: 'book.xlsx',
+  updates: [
+    { cell: 'B7', value: 1234.5, numberFormat: '#,##0.00' },
+    { cell: 'C7', value: 'text' },
+    { sheet: 'Summary', cell: 'A1', value: new Date(2026, 0, 15) }
+  ]
+});
+```
+
+`updateCells` patches the worksheet in place: a cell keeps its existing style
+unless the update supplies a `numberFormat`, formulas in a patched cell are
+dropped rather than left stale, and missing cells or rows are inserted in the
+right order. Everything not listed stays byte-identical.
+
 ## Performance
 
 The reader only does work you asked for:

@@ -489,7 +489,8 @@ function writeTableAsJSON(rows, options = {}) {
     freezeHeader = false,
     output,
     compression,
-    columns
+    columns,
+    template
   } = options;
 
   if (rows.length === 0 && (columns === undefined || columns === null)) {
@@ -507,10 +508,11 @@ function writeTableAsJSON(rows, options = {}) {
   if (output !== undefined && typeof output !== 'string') {
     throw makeError('INVALID_OPTIONS', 'options.output must be a file path');
   }
-  if (compression !== undefined &&
-      (!Number.isInteger(compression) || compression < 0 || compression > 9)) {
-    throw makeError('INVALID_OPTIONS', 'options.compression must be an integer between 0 and 9');
+  if (template !== undefined && template !== null &&
+      typeof template !== 'string' && !Buffer.isBuffer(template)) {
+    throw makeError('INVALID_OPTIONS', 'options.template must be a file path or a Buffer');
   }
+  validateCompression(compression);
 
   const specs = normalizeWriteColumns(rows, columns);
 
@@ -521,7 +523,82 @@ function writeTableAsJSON(rows, options = {}) {
       freezeHeader,
       output: output === undefined ? undefined : path.resolve(output),
       compression,
-      columns: specs
+      columns: specs,
+      template: Buffer.isBuffer(template) || template === undefined || template === null
+        ? template
+        : path.resolve(template)
+    });
+  } catch (err) {
+    if (!err.code) {
+      err.code = 'WRITE_FAILED';
+    }
+    throw err;
+  }
+}
+
+function validateCompression(compression) {
+  if (compression !== undefined &&
+      (!Number.isInteger(compression) || compression < 0 || compression > 9)) {
+    throw makeError('INVALID_OPTIONS', 'options.compression must be an integer between 0 and 9');
+  }
+}
+
+/**
+ * Rewrites individual cells of an existing workbook and returns the result.
+ *
+ * Only the affected worksheets are regenerated; every other part of the package
+ * is copied byte for byte, so untouched sheets, images and styles survive
+ * exactly as they were. A cell keeps its existing style unless the update
+ * supplies a `numberFormat`.
+ *
+ * @param {Object} spec
+ * @param {string|Buffer} spec.template - Workbook to patch.
+ * @param {Array<Object>} spec.updates - `{ sheet?, cell, value?, numberFormat? }`
+ *   entries; `cell` is an A1 reference ("B7"), `sheet` defaults to the first.
+ * @param {string} [spec.output] - Write the file natively instead of returning
+ *   a Buffer; the result is then `{ bytes, cells }`.
+ * @param {number} [spec.compression] - 0 (store) .. 9 (max).
+ * @returns {Buffer|{bytes: number, cells: number}}
+ */
+function updateCells(spec = {}) {
+  if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw makeError('INVALID_OPTIONS', 'updateCells expects an options object');
+  }
+
+  const { template, updates, output, compression } = spec;
+
+  if (typeof template !== 'string' && !Buffer.isBuffer(template)) {
+    throw makeError('INVALID_OPTIONS', 'spec.template is required (file path or Buffer)');
+  }
+  if (!Array.isArray(updates) || updates.length === 0) {
+    throw makeError('INVALID_OPTIONS', 'spec.updates must be a non-empty array');
+  }
+  for (let i = 0; i < updates.length; i++) {
+    const update = updates[i];
+    if (update === null || typeof update !== 'object' || Array.isArray(update)) {
+      throw makeError('INVALID_OPTIONS', `spec.updates[${i}] must be an object`);
+    }
+    if (typeof update.cell !== 'string' || update.cell.trim() === '') {
+      throw makeError('INVALID_OPTIONS', `spec.updates[${i}].cell must be a reference like "B7"`);
+    }
+    if (update.sheet !== undefined && typeof update.sheet !== 'string') {
+      throw makeError('INVALID_OPTIONS', `spec.updates[${i}].sheet must be a string`);
+    }
+    if (update.numberFormat !== undefined && typeof update.numberFormat !== 'string') {
+      throw makeError('INVALID_OPTIONS', `spec.updates[${i}].numberFormat must be a string`);
+    }
+  }
+  if (output !== undefined && typeof output !== 'string') {
+    throw makeError('INVALID_OPTIONS', 'spec.output must be a file path');
+  }
+  validateCompression(compression);
+
+  try {
+    return addon.writeCells({
+      template: Buffer.isBuffer(template) ? template : path.resolve(template),
+      updates,
+      output: output === undefined ? undefined : path.resolve(output),
+      compression
     });
   } catch (err) {
     if (!err.code) {
@@ -622,5 +699,6 @@ async function readTableAsJSONAsync(input, options = {}) {
 module.exports = {
   readTableAsJSON,
   readTableAsJSONAsync,
-  writeTableAsJSON
+  writeTableAsJSON,
+  updateCells
 };

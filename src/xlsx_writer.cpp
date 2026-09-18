@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <map>
 #include <sstream>
 
 namespace baja_xlsx {
@@ -58,94 +57,13 @@ size_t utf8Length(const std::string& text) {
     return count;
 }
 
-struct Styles {
-    std::vector<std::string> formats;        // custom number formats (id 164+)
-    std::vector<std::string> xfs;            // extra cellXfs bodies (index 0 = default)
-    std::vector<size_t> styleIndexByColumn;  // 0 = default
-    std::vector<bool> explicitFormat;        // column defines its own numberFormat
-    std::map<std::string, size_t> formatIds; // format code -> numFmtId
-    std::map<std::string, size_t> xfIds;     // xf body -> cellXfs index
-
-    // Adds (or reuses) a cellXfs entry with the given number format.
-    size_t styleForFormat(const std::string& formatCode) {
-        size_t numFmtId = 0;
-        auto formatIt = formatIds.find(formatCode);
-        if (formatIt == formatIds.end()) {
-            numFmtId = 164 + formats.size();
-            formatIds.emplace(formatCode, numFmtId);
-            formats.push_back(formatCode);
-        } else {
-            numFmtId = formatIt->second;
-        }
-
-        std::ostringstream xf;
-        xf << "<xf numFmtId=\"" << numFmtId
-           << "\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>";
-        const std::string body = xf.str();
-
-        auto xfIt = xfIds.find(body);
-        if (xfIt != xfIds.end()) {
-            return xfIt->second;
-        }
-        const size_t index = xfs.size() + 1;
-        xfIds.emplace(body, index);
-        xfs.push_back(body);
-        return index;
-    }
-};
-
-// Builds one <xf> per distinct (numberFormat, align) pair. Columns without
-// either keep style 0, so simple sheets carry no styling overhead at all.
-Styles buildStyles(const WritePlan& plan) {
-    Styles styles;
-    styles.styleIndexByColumn.assign(plan.columns.size(), 0);
-    styles.explicitFormat.assign(plan.columns.size(), false);
-
-    for (size_t i = 0; i < plan.columns.size(); ++i) {
-        const WriteColumn& column = plan.columns[i];
-        styles.explicitFormat[i] = !column.numberFormat.empty();
-        if (column.numberFormat.empty() && column.align.empty()) {
-            continue;
-        }
-
-        if (column.align.empty()) {
-            styles.styleIndexByColumn[i] = styles.styleForFormat(column.numberFormat);
-            continue;
-        }
-
-        size_t numFmtId = 0;
-        if (!column.numberFormat.empty()) {
-            auto it = styles.formatIds.find(column.numberFormat);
-            if (it == styles.formatIds.end()) {
-                numFmtId = 164 + styles.formats.size();
-                styles.formatIds.emplace(column.numberFormat, numFmtId);
-                styles.formats.push_back(column.numberFormat);
-            } else {
-                numFmtId = it->second;
-            }
-        }
-
-        std::ostringstream xf;
-        xf << "<xf numFmtId=\"" << numFmtId
-           << "\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"";
-        if (numFmtId != 0) {
-            xf << " applyNumberFormat=\"1\"";
-        }
-        xf << " applyAlignment=\"1\"><alignment horizontal=\""
-           << escapeXmlAttribute(column.align) << "\"/></xf>";
-        const std::string body = xf.str();
-
-        auto xfIt = styles.xfIds.find(body);
-        if (xfIt != styles.xfIds.end()) {
-            styles.styleIndexByColumn[i] = xfIt->second;
-        } else {
-            const size_t index = styles.xfs.size() + 1; // index 0 is the default xf
-            styles.xfIds.emplace(body, index);
-            styles.xfs.push_back(body);
-            styles.styleIndexByColumn[i] = index;
-        }
-    }
-    return styles;
+bool needsPreserveSpace(const std::string& text) {
+    if (text.empty()) return false;
+    const char first = text.front();
+    const char last = text.back();
+    if (first == ' ' || first == '\t' || first == '\n' || first == '\r') return true;
+    if (last == ' ' || last == '\t' || last == '\n' || last == '\r') return true;
+    return text.find('\n') != std::string::npos || text.find('\t') != std::string::npos;
 }
 
 std::string buildContentTypes() {
@@ -187,94 +105,78 @@ std::string buildWorkbookRels() {
     return xml;
 }
 
-std::string buildStylesXml(const Styles& styles) {
-    std::string xml = kXmlDeclaration;
-    xml += "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">";
-
-    if (!styles.formats.empty()) {
-        xml += "<numFmts count=\"" + std::to_string(styles.formats.size()) + "\">";
-        for (size_t i = 0; i < styles.formats.size(); ++i) {
-            xml += "<numFmt numFmtId=\"" + std::to_string(164 + i) + "\" formatCode=\"" +
-                   escapeXmlAttribute(styles.formats[i]) + "\"/>";
-        }
-        xml += "</numFmts>";
-    }
-
-    xml += "<fonts count=\"1\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>";
-    xml += "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill>"
-           "<fill><patternFill patternType=\"gray125\"/></fill></fills>";
-    xml += "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>";
-    xml += "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>";
-    xml += "<cellXfs count=\"" + std::to_string(styles.xfs.size() + 1) + "\">";
-    xml += "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>";
-    for (const std::string& xf : styles.xfs) {
-        xml += xf;
-    }
-    xml += "</cellXfs>";
-    xml += "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>";
-    xml += "</styleSheet>";
-    return xml;
-}
-
-bool needsPreserveSpace(const std::string& text) {
-    if (text.empty()) return false;
-    const char first = text.front();
-    const char last = text.back();
-    if (first == ' ' || first == '\t' || first == '\n' || first == '\r') return true;
-    if (last == ' ' || last == '\t' || last == '\n' || last == '\r') return true;
-    return text.find('\n') != std::string::npos || text.find('\t') != std::string::npos;
-}
-
-void appendCell(std::string& out, size_t column, size_t row, const WriteCell& cell,
-                size_t styleIndex, const std::vector<std::string>& letters) {
-    if (cell.kind == WriteCell::Kind::Empty) {
-        return; // an absent <c> is an empty cell
-    }
-
-    out += "<c r=\"";
-    out += letters[column];
-    out += std::to_string(row);
-    out += "\"";
-
-    if (cell.kind == WriteCell::Kind::Text) {
-        out += " t=\"inlineStr\"";
-    } else if (cell.kind == WriteCell::Kind::Boolean) {
-        out += " t=\"b\"";
-    }
-    if (styleIndex != 0) {
-        out += " s=\"";
-        out += std::to_string(styleIndex);
-        out += "\"";
-    }
-    out += ">";
-
-    switch (cell.kind) {
-        case WriteCell::Kind::Number:
-            out += "<v>";
-            out += formatNumber(cell.number);
-            out += "</v>";
-            break;
-        case WriteCell::Kind::Boolean:
-            out += "<v>";
-            out += cell.boolean ? "1" : "0";
-            out += "</v>";
-            break;
-        case WriteCell::Kind::Text:
-            out += "<is><t";
-            if (needsPreserveSpace(cell.text)) {
-                out += " xml:space=\"preserve\"";
-            }
-            out += ">";
-            appendEscaped(out, cell.text, false);
-            out += "</t></is>";
-            break;
-        case WriteCell::Kind::Empty:
-            break;
-    }
-    out += "</c>";
-}
-
 } // namespace
+
+size_t SheetStyles::styleForFormat(const std::string& formatCode, const std::string& align) {
+    if (formatCode.empty() && align.empty()) {
+        return 0;
+    }
+
+    size_t numFmtId = 0;
+    if (!formatCode.empty()) {
+        auto formatIt = formatIds.find(formatCode);
+        if (formatIt == formatIds.end()) {
+            numFmtId = firstNumFmtId + numFmtCodes.size();
+            formatIds.emplace(formatCode, numFmtId);
+            numFmtCodes.push_back(formatCode);
+        } else {
+            numFmtId = formatIt->second;
+        }
+    }
+
+    std::ostringstream xf;
+    xf << "<xf numFmtId=\"" << numFmtId
+       << "\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"";
+    if (numFmtId != 0) {
+        xf << " applyNumberFormat=\"1\"";
+    }
+    if (align.empty()) {
+        xf << "/>";
+    } else {
+        xf << " applyAlignment=\"1\"><alignment horizontal=\""
+           << escapeXmlAttribute(align) << "\"/></xf>";
+    }
+    const std::string body = xf.str();
+
+    size_t index = 0;
+    auto xfIt = xfIds.find(body);
+    if (xfIt != xfIds.end()) {
+        index = xfIt->second;
+    } else {
+        index = xfBaseIndex + xfBodies.size();
+        xfIds.emplace(body, index);
+        xfBodies.push_back(body);
+    }
+    if (!formatCode.empty()) {
+        formatStyleIds[formatCode] = index;
+    }
+    return index;
+}
+
+SheetStyles buildSheetStyles(const WritePlan& plan, size_t firstNumFmtId, size_t xfBaseIndex) {
+    SheetStyles styles;
+    styles.firstNumFmtId = firstNumFmtId;
+    styles.xfBaseIndex = xfBaseIndex;
+    styles.styleIndexByColumn.assign(plan.columns.size(), 0);
+    styles.explicitFormat.assign(plan.columns.size(), false);
+
+    for (size_t i = 0; i < plan.columns.size(); ++i) {
+        const WriteColumn& column = plan.columns[i];
+        styles.explicitFormat[i] = !column.numberFormat.empty();
+        if (column.numberFormat.empty() && column.align.empty()) {
+            continue;
+        }
+        styles.styleIndexByColumn[i] = styles.styleForFormat(column.numberFormat, column.align);
+    }
+
+    // Date formats are resolved from the values while rows stream, so they are
+    // allocated up front: a cell that needs one only picks an index that is
+    // already there, which keeps both the "styles first" (template) and
+    // "styles last" (new workbook) orders correct.
+    styles.dateStyleIndex = styles.styleForFormat("yyyy-mm-dd");
+    styles.dateTimeStyleIndex = styles.styleForFormat("yyyy-mm-dd hh:mm:ss");
+    return styles;
+}
 
 std::string escapeXmlText(const std::string& text) {
     std::string out;
@@ -347,6 +249,143 @@ bool isValidSheetName(const std::string& name, std::string& reason) {
     return true;
 }
 
+void appendCellXml(std::string& out, const std::string& letters, size_t row,
+                   const WriteCell& cell, size_t styleIndex) {
+    if (cell.kind == WriteCell::Kind::Empty) {
+        return; // an absent <c> is an empty cell
+    }
+
+    out += "<c r=\"";
+    out += letters;
+    out += std::to_string(row);
+    out += "\"";
+
+    if (cell.kind == WriteCell::Kind::Text) {
+        out += " t=\"inlineStr\"";
+    } else if (cell.kind == WriteCell::Kind::Boolean) {
+        out += " t=\"b\"";
+    }
+    if (styleIndex != 0) {
+        out += " s=\"";
+        out += std::to_string(styleIndex);
+        out += "\"";
+    }
+    out += ">";
+
+    switch (cell.kind) {
+        case WriteCell::Kind::Number:
+            out += "<v>";
+            out += formatNumber(cell.number);
+            out += "</v>";
+            break;
+        case WriteCell::Kind::Boolean:
+            out += "<v>";
+            out += cell.boolean ? "1" : "0";
+            out += "</v>";
+            break;
+        case WriteCell::Kind::Text:
+            out += "<is><t";
+            if (needsPreserveSpace(cell.text)) {
+                out += " xml:space=\"preserve\"";
+            }
+            out += ">";
+            appendEscaped(out, cell.text, false);
+            out += "</t></is>";
+            break;
+        case WriteCell::Kind::Empty:
+            break;
+    }
+    out += "</c>";
+}
+
+std::string buildStylesXml(const SheetStyles& styles) {
+    std::string xml = kXmlDeclaration;
+    xml += "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">";
+
+    if (!styles.numFmtCodes.empty()) {
+        xml += "<numFmts count=\"" + std::to_string(styles.numFmtCodes.size()) + "\">";
+        for (size_t i = 0; i < styles.numFmtCodes.size(); ++i) {
+            xml += "<numFmt numFmtId=\"" + std::to_string(styles.firstNumFmtId + i) +
+                   "\" formatCode=\"" + escapeXmlAttribute(styles.numFmtCodes[i]) + "\"/>";
+        }
+        xml += "</numFmts>";
+    }
+
+    xml += "<fonts count=\"1\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>";
+    xml += "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill>"
+           "<fill><patternFill patternType=\"gray125\"/></fill></fills>";
+    xml += "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>";
+    xml += "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>";
+    xml += "<cellXfs count=\"" + std::to_string(styles.xfBodies.size() + 1) + "\">";
+    xml += "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>";
+    for (const std::string& xf : styles.xfBodies) {
+        xml += xf;
+    }
+    xml += "</cellXfs>";
+    xml += "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>";
+    xml += "</styleSheet>";
+    return xml;
+}
+
+SheetRowStream::SheetRowStream(const WritePlan& plan, RowSource& source, SheetStyles& styles)
+    : plan_(plan), source_(source), styles_(styles) {
+    letters_.resize(plan.columns.size());
+    for (size_t i = 0; i < plan.columns.size(); ++i) {
+        letters_[i] = columnLetters(i + 1);
+    }
+    totalRows_ = source.rowCount() + (plan.includeHeader ? 1 : 0);
+    row_.reserve(plan.columns.size());
+}
+
+bool SheetRowStream::next(std::string& chunk) {
+    chunk.clear();
+    if (emitted_ >= totalRows_) {
+        return false;
+    }
+
+    const size_t columnCount = plan_.columns.size();
+
+    if (plan_.includeHeader && emitted_ == 0) {
+        chunk += "<row r=\"1\">";
+        for (size_t i = 0; i < columnCount; ++i) {
+            WriteCell cell;
+            cell.kind = WriteCell::Kind::Text;
+            cell.text = plan_.columns[i].header;
+            appendCellXml(chunk, letters_[i], 1, cell, 0);
+        }
+        chunk += "</row>";
+        ++emitted_;
+        return true;
+    }
+
+    const size_t dataIndex = emitted_ - (plan_.includeHeader ? 1 : 0);
+    if (dataIndex >= source_.rowCount()) {
+        emitted_ = totalRows_;
+        return false;
+    }
+
+    row_.clear();
+    if (!source_.nextRow(row_)) {
+        row_.assign(columnCount, WriteCell());
+    }
+
+    const size_t rowNumber = emitted_ + 1;
+    chunk += "<row r=\"" + std::to_string(rowNumber) + "\">";
+    for (size_t i = 0; i < columnCount; ++i) {
+        const WriteCell& cell = i < row_.size() ? row_[i] : WriteCell();
+        size_t style = styles_.styleIndexByColumn[i];
+        if (cell.isDate && !styles_.explicitFormat[i]) {
+            // Excel would show the raw serial without this.
+            const bool withTime = (cell.number - std::floor(cell.number)) > 1e-9;
+            style = withTime ? styles_.dateTimeStyleIndex : styles_.dateStyleIndex;
+        }
+        appendCellXml(chunk, letters_[i], rowNumber, cell, style);
+    }
+    chunk += "</row>";
+    ++emitted_;
+    return true;
+}
+
 bool writeNewWorkbook(const WritePlan& plan, RowSource& source,
                       zipio::ZipWriter::Compression compression,
                       std::vector<uint8_t>& out, std::string& error) {
@@ -360,14 +399,7 @@ bool writeNewWorkbook(const WritePlan& plan, RowSource& source,
         return false;
     }
 
-    // Styles are mutable while the sheet streams (date columns get their format
-    // on first use), which is why styles.xml is written after the sheet.
-    Styles styles = buildStyles(plan);
-
-    std::vector<std::string> letters(columnCount);
-    for (size_t i = 0; i < columnCount; ++i) {
-        letters[i] = columnLetters(i + 1);
-    }
+    SheetStyles styles = buildSheetStyles(plan);
 
     zipio::ZipWriter writer(out);
 
@@ -378,20 +410,18 @@ bool writeNewWorkbook(const WritePlan& plan, RowSource& source,
         return false;
     }
 
-    // The worksheet is generated row by row: its uncompressed XML never has to
-    // exist in full, whatever the row count.
-    const size_t totalRows = source.rowCount() + (plan.includeHeader ? 1 : 0);
-    size_t emitted = 0;
-    std::vector<WriteCell> row;
-    row.reserve(columnCount);
-
     const bool hasColumns = std::any_of(plan.columns.begin(), plan.columns.end(),
                                         [](const WriteColumn& c) { return c.width > 0; });
 
-    const bool producerOk = writer.addStreamedEntry(
+    SheetRowStream rows(plan, source, styles);
+    bool preambleSent = false;
+    bool closingSent = false;
+
+    const bool sheetOk = writer.addStreamedEntry(
         "xl/worksheets/sheet1.xml",
         [&](std::string& chunk) -> bool {
-            if (emitted == 0) {
+            if (!preambleSent) {
+                preambleSent = true;
                 chunk += kXmlDeclaration;
                 chunk += "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">";
                 if (plan.freezeHeader) {
@@ -412,59 +442,25 @@ bool writeNewWorkbook(const WritePlan& plan, RowSource& source,
                     chunk += "</cols>";
                 }
                 chunk += "<sheetData>";
-            }
-
-            if (plan.includeHeader && emitted == 0) {
-                chunk += "<row r=\"1\">";
-                for (size_t i = 0; i < columnCount; ++i) {
-                    WriteCell cell;
-                    cell.kind = WriteCell::Kind::Text;
-                    cell.text = plan.columns[i].header;
-                    appendCell(chunk, i, 1, cell, 0, letters);
-                }
-                chunk += "</row>";
-                ++emitted;
                 return true;
             }
-
-            const size_t dataIndex = emitted - (plan.includeHeader ? 1 : 0);
-            if (dataIndex >= source.rowCount()) {
+            if (rows.next(chunk)) {
+                return true;
+            }
+            if (!closingSent) {
+                closingSent = true;
                 chunk += "</sheetData></worksheet>";
-                ++emitted;
-                return false;
+                return true;
             }
-
-            row.clear();
-            if (!source.nextRow(row)) {
-                row.assign(columnCount, WriteCell());
-            }
-
-            const size_t rowNumber = emitted + 1;
-            chunk += "<row r=\"" + std::to_string(rowNumber) + "\">";
-            for (size_t i = 0; i < columnCount; ++i) {
-                const WriteCell& cell = i < row.size() ? row[i] : WriteCell();
-                size_t style = styles.styleIndexByColumn[i];
-                if (cell.isDate && !styles.explicitFormat[i]) {
-                    // Excel would show the raw serial without this.
-                    const bool withTime = (cell.number - std::floor(cell.number)) > 1e-9;
-                    style = styles.styleForFormat(withTime ? "yyyy-mm-dd hh:mm:ss"
-                                                           : "yyyy-mm-dd");
-                }
-                appendCell(chunk, i, rowNumber, cell, style, letters);
-            }
-            chunk += "</row>";
-            ++emitted;
-            return true;
+            return false;
         },
         compression, error);
 
-    if (!producerOk) {
+    if (!sheetOk) {
         return false;
     }
-    if (emitted != totalRows + 1) {
-        // emitted counts the closing call as well; anything else means the
-        // source disagreed with its own rowCount().
-        error = "WRITE_FAILED|Row count mismatch while generating the worksheet";
+    if (!closingSent) {
+        error = "WRITE_FAILED|Worksheet generation stopped early";
         return false;
     }
     return writer.addEntry("xl/styles.xml", buildStylesXml(styles), compression, error) &&

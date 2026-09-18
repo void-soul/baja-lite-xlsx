@@ -159,6 +159,48 @@ const { rowCount } = await readTableAsJSONAsync('huge.xlsx', {
 - `maxRows` / `maxCols` 限制工作表物化规模；
 - 截断始终以 warning 上报，绝不静默发生。
 
+## 写入
+
+### 用 JSON 新建工作簿
+
+```javascript
+const { writeTableAsJSON, updateCells } = require('baja-lite-xlsx');
+
+// 返回 Buffer
+const bytes = writeTableAsJSON(rows, { sheetName: 'Data' });
+fs.writeFileSync('out.xlsx', bytes);
+
+// 或交给原生层直接落盘：=> { bytes, rowCount, sheetName }
+writeTableAsJSON(rows, {
+  output: 'out.xlsx',
+  columns: { amount: { header: '金额', numberFormat: '#,##0.00', width: 14 } }
+});
+```
+
+数字写为数值、布尔写为布尔、`Date` 写为带自动日期格式的真实日期——在 Excel 里
+仍可继续计算，而不会退化成文本。
+
+### 写入已有工作簿
+
+```javascript
+// 覆盖目标 sheet 的数据，其余部分原样保留（其他 sheet、图片、主题、样式按字节搬运）
+const buffer = writeTableAsJSON(rows, { template: 'template.xlsx' });
+
+// 修改指定单元格：返回 Buffer；传 output 时返回 { bytes, cells }
+const patched = updateCells({
+  template: 'book.xlsx',
+  updates: [
+    { cell: 'B7', value: 1234.5, numberFormat: '#,##0.00' },
+    { cell: 'C7', value: '文本' },
+    { sheet: 'Summary', cell: 'A1', value: new Date(2026, 0, 15) }
+  ]
+});
+```
+
+`updateCells` 是就地打补丁：未传 `numberFormat` 时单元格保留原有样式；被改写单元格
+里残留的公式会被清除而不是留下过期值；不存在单元格/行会按列序、行序正确插入。未被
+列出的内容保持逐字节不变。
+
 ## 性能
 
 读取过程只做你要求的那部分工作：
