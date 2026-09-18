@@ -41,6 +41,10 @@ Invalid arguments still throw synchronously; I/O failures reject with the same
 - New package IO primitives (`readPackage` / `buildPackage`) back the JS-side
   template engine, and `assemblePackage` can now add entries, not only replace
   them.
+- **Fixed a latent crash**: the async read worker always took the file-path
+  code path, so `readTableAsJSON` on a `Buffer` hit `load("")` inside xlnt and
+  segfaulted. Buffer input now takes the bytes path (the sync API was already
+  correct); async Buffer reads were never covered by a test until now.
 
 ## 1.7.1 (2026-09-18) — direct read, one copy per cell
 

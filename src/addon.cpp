@@ -503,7 +503,10 @@ public:
 
     void Execute() override {
         XlsxReader reader;
-        data_ = reader.readExcel(filepath_, options_);
+        // Buffer input must take the bytes overload: the string overload would
+        // try to load an empty path (and xlnt segfaults on it).
+        data_ = fromMemory_ ? reader.readExcel(bytes_, options_)
+                            : reader.readExcel(filepath_, options_);
         if (!reader.getLastError().empty()) {
             SetError(reader.getLastError());
         }

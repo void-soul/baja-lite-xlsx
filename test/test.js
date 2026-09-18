@@ -1144,7 +1144,7 @@ test('values: typed streams typed batches too', null,async () => {
   const workbook = await writeTableAsJSON([{ n: 1 }, { n: 2 }], { sheetName: 'S' });
   const batches = [];
   await readTableAsJSON(workbook, {
-    engine: 'xml', values: 'typed', batchSize: 1,
+    engine: 'xml', values: 'typed', includeImages: false, batchSize: 1,
     onBatch: (batch) => batches.push(batch)
   });
   assert.equal(batches.flat().map((r) => r.n).join(','), '1,2');
