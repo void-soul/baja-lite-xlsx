@@ -29,42 +29,51 @@ const FIXTURES = {
 let passed = 0;
 let skipped = 0;
 
-function test(name, fixtureKey, fn) {
-  const fixture = fixtureKey ? FIXTURES[fixtureKey] : null;
-  if (fixtureKey && !fs.existsSync(fixture)) {
-    console.log(`SKIP ${name} (missing fixture: ${path.basename(fixture)})`);
-    skipped++;
-    return;
-  }
-  try {
-    fn(fixture);
-    passed++;
-    console.log(`PASS ${name}`);
-  } catch (err) {
-    console.error(`FAIL ${name}`);
-    console.error(err && err.stack ? err.stack : err);
-    process.exitCode = 1;
-  }
-}
+// A rejected promise nobody awaited is a test bug: report it instead of letting
+// node abort (an abort mid-flight can leave a native worker waiting forever).
+process.on('unhandledRejection', (err) => {
+  console.error('UNHANDLED REJECTION (test bug):');
+  console.error(err && err.stack ? err.stack : err);
+  process.exitCode = 1;
+});
+
+// Tests run one after another: these cases share output paths and fixture
+// files, so overlapping them would race.
+let chain = Promise.resolve();
 
 function test(name, fixtureKey, fn) {
-  const fixture = fixtureKey ? FIXTURES[fixtureKey] : null;
-  if (fixtureKey && !fs.existsSync(fixture)) {
-    console.log(`SKIP ${name} (missing fixture: ${path.basename(fixture)})`);
-    skipped++;
-    return Promise.resolve();
-  }
-  return fn(fixture).then(
-    () => {
-      passed++;
-      console.log(`PASS ${name}`);
-    },
-    (err) => {
-      console.error(`FAIL ${name}`);
-      console.error(err && err.stack ? err.stack : err);
-      process.exitCode = 1;
+  chain = chain.then(() => {
+    const fixture = fixtureKey ? FIXTURES[fixtureKey] : null;
+    if (fixtureKey && !fs.existsSync(fixture)) {
+      console.log(`SKIP ${name} (missing fixture: ${path.basename(fixture)})`);
+      skipped++;
+      return undefined;
     }
-  );
+    // Logged before the work starts, so a hang still names the test at fault.
+    console.log(`RUN  ${name}`);
+    const finish = (err) => {
+      if (err) {
+        console.error(`FAIL ${name}`);
+        console.error(err && err.stack ? err.stack : err);
+        process.exitCode = 1;
+      } else {
+        passed++;
+        console.log(`PASS ${name}`);
+      }
+    };
+    let result;
+    try {
+      result = fn(fixture);
+    } catch (err) {
+      finish(err);
+      return undefined;
+    }
+    if (result && typeof result.then === 'function') {
+      return result.then(() => finish(), finish);
+    }
+    finish();
+    return undefined;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +338,7 @@ test('column config drives header text, order and number formats', null,async ()
   });
 
   assert.deepEqual(await readTableAsJSON(buffer), [{ 姓名: 'Ada', 金额: '1234.5' }]);
-  assert.equal(await readTableAsJSON(buffer, { sheetName: '报表' }).length, 1);
+  assert.equal((await readTableAsJSON(buffer, { sheetName: '报表' })).length, 1);
   await assert.rejects(
     async () => await readTableAsJSON(buffer, { sheetName: 'nope' }),
     (err) => err.code === 'SHEET_NOT_FOUND'
@@ -364,7 +373,7 @@ test('includeHeader false leaves only data rows', null,async () => {
     includeHeader: false
   });
   // The reader consumes row 0 as its header, so one row must remain.
-  assert.equal(await readTableAsJSON(buffer).length, 1);
+  assert.equal((await readTableAsJSON(buffer)).length, 1);
 });
 
 test('Date values become real Excel dates', null,async () => {
@@ -385,15 +394,26 @@ test('bad write specs -> INVALID_OPTIONS', null,async () => {
 // Write: template workbook (mode 1b) and cell patching (mode 2)
 // ---------------------------------------------------------------------------
 
-test('writeTableAsJSON with a template replaces the sheet data', 'sample',async (fixture) => {
-  const buffer = await writeTableAsJSON([{ alpha: 'x', beta: 42 }], { sourceFile: fixture });
+test('writeTableAsJSON with sourceFile appends to the sheet by default', 'sample',async (fixture) => {
+  const before = await readTableAsJSON(fixture);
+  const buffer = await writeTableAsJSON([{ a: 1, b: 'x' }], { sourceFile: fixture });
   assert.ok(Buffer.isBuffer(buffer));
+
+  const after = await readTableAsJSON(buffer);
+  assert.equal(after.length, before.length + 1, 'exactly one row is appended');
+});
+
+test('writeTableAsJSON with sourceFile and append: false replaces the sheet data', 'sample',async (fixture) => {
+  const buffer = await writeTableAsJSON([{ alpha: 'x', beta: 42 }], {
+    sourceFile: fixture,
+    append: false
+  });
   assert.deepEqual(await readTableAsJSON(buffer), [{ alpha: 'x', beta: '42' }]);
 });
 
-test('a Buffer works as the template', 'sample',async (fixture) => {
+test('a Buffer works as sourceFile', 'sample',async (fixture) => {
   const bytes = fs.readFileSync(fixture);
-  const buffer = await writeTableAsJSON([{ a: 1 }], { sourceFile: bytes });
+  const buffer = await writeTableAsJSON([{ a: 1 }], { sourceFile: bytes, append: false });
   assert.deepEqual(await readTableAsJSON(buffer), [{ a: '1' }]);
 });
 
@@ -455,7 +475,9 @@ test('updateCells writes to a file when asked', 'sample',async (fixture) => {
   assert.ok(fs.existsSync(target));
   assert.equal(summary.cells, 1);
   assert.ok(summary.bytes > 0);
-  assert.equal(await readTableAsJSON(target)[0][Object.keys(await readTableAsJSON(target)[0])[0]], 'FILE');
+
+  const patched = await readTableAsJSON(target);
+  assert.equal(patched[0][Object.keys(patched[0])[0]], 'FILE');
 });
 
 test('bad update specs -> INVALID_OPTIONS', null,async () => {
@@ -881,7 +903,7 @@ test('a streamed write reports its row count when writing to a file', null, asyn
   assert.ok(fs.existsSync(target));
   assert.equal(summary.rowCount, 100);
   assert.equal(summary.sheetName, 'Sheet1');
-  assert.equal(await readTableAsJSON(target).length, 100);
+  assert.equal((await readTableAsJSON(target)).length, 100);
 });
 
 // ---------------------------------------------------------------------------
@@ -970,8 +992,10 @@ test('async matches sync result', 'sample', async (fixture) => {
 });
 
 test('async rejects with coded errors', null, async () => {
+  // The call must sit inside a function: an invalid path is rejected
+  // asynchronously, but argument validation throws synchronously.
   await assert.rejects(
-    await readTableAsJSON('definitely-not-here-67890.xlsx'),
+    async () => await readTableAsJSON('definitely-not-here-67890.xlsx'),
     (err) => err.code === 'FILE_NOT_FOUND'
   );
 });
@@ -995,10 +1019,20 @@ test('WPS fixture reads without throwing', 'wps',async (fixture) => {
 // v2: appending, multi-sheet writes, ejsExcel templates and typed reads
 // ---------------------------------------------------------------------------
 
-test('every public write/read entry point returns a Promise', null,async () => {
-  assert.ok(writeTableAsJSON([{ a: 1 }]) instanceof Promise, 'writeTableAsJSON');
-  assert.ok(readTableAsJSON('whatever.xlsx') instanceof Promise, 'readTableAsJSON');
-  await Promise.allSettled([writeTableAsJSON([{ a: 1 }]), readTableAsJSON('whatever.xlsx')]);
+test('public entry points are async and validate synchronously', null,async () => {
+  const writing = writeTableAsJSON([{ a: 1 }]);
+  assert.ok(writing instanceof Promise, 'writeTableAsJSON returns a Promise');
+  const bytes = await writing;
+  assert.ok(Buffer.isBuffer(bytes));
+
+  const reading = readTableAsJSON(bytes);
+  assert.ok(reading instanceof Promise, 'readTableAsJSON returns a Promise');
+  assert.ok(Array.isArray(await reading));
+
+  // Bad arguments throw at the call site instead of floating as a rejection.
+  assert.throws(() => readTableAsJSON('definitely-not-here.xlsx'),
+    (err) => err.code === 'FILE_NOT_FOUND');
+  assert.throws(() => writeTableAsJSON('nope', {}), (err) => err.code === 'INVALID_OPTIONS');
 });
 
 test('sourceFile appends rows and chains on the returned Buffer', null,async () => {
@@ -1094,10 +1128,11 @@ test('renderTemplate merges cells and groups rows on request', null,async () => 
 test('renderTemplate renders every sheet with _data_[i]', null,async () => {
   const first = await makeTemplate([['who'], ['<%=_data_[0].who%>']], [{}, {}]);
   const twoSheets = await writeTableAsJSON(
-    [['<%=_data_[1].tag%>']],
+    [['tag'], ['<%=_data_[1].tag%>']],
     { columns: [{}], includeHeader: false, sourceFile: first, sheetName: 'S2' });
 
   const buffer = await renderTemplate([{ who: 'one' }, { tag: 'two' }], { template: twoSheets });
+  // Each sheet reads its own slice: sheet 1 -> _data_[0], sheet 2 -> _data_[1].
   assert.deepEqual(await readTableAsJSON(buffer, { sheetName: 'Sheet1', headerRow: 0 }),
     [{ who: 'one' }]);
   assert.deepEqual(await readTableAsJSON(buffer, { sheetName: 'S2', headerRow: 0 }),
@@ -1121,7 +1156,9 @@ test('values: typed returns numbers, booleans and Dates (engine xml)', null,asyn
   assert.equal(rows[0].name, 'a');
   assert.equal(rows[0].amount, 2.5);
   assert.ok(rows[0].when instanceof Date);
-  assert.equal(rows[0].when.getTime(), new Date(2026, 0, 15).getTime());
+  // Typed dates are absolute instants at UTC midnight of the Excel date, so the
+  // assertion must not depend on the machine's time zone.
+  assert.equal(rows[0].when.toISOString().slice(0, 10), '2026-01-15');
   assert.equal(rows[0].flag, true);
 
   // The string engine output is unchanged.
@@ -1152,6 +1189,6 @@ test('values: typed streams typed batches too', null,async () => {
 
 // ---------------------------------------------------------------------------
 
-Promise.all(pendingChecks).then(() => {
+chain.then(() => {
   console.log(`\n${passed} passed, ${skipped} skipped, ${process.exitCode ? 'FAILED' : 'all OK'}`);
 });

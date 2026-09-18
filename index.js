@@ -736,11 +736,12 @@ const MAX_TEMPLATE_DEPTH = 12;
 /**
  * Flattens the values object into `path -> primitive`, which is what lets the
  * renderer stay free of host-language callbacks. Arrays are flattened by index
- * and get an extra `<path>.length` entry.
+ * and get an extra `<path>.length` entry -- they are also the ejsExcel way of
+ * passing one data set per sheet (`_data_[i]`), so an array is valid input.
  * @private
  */
 function flattenTemplateValues(values) {
-  if (values === null || typeof values !== 'object' || Array.isArray(values)) {
+  if (values === null || typeof values !== 'object') {
     throw makeError('INVALID_OPTIONS', 'renderTemplate expects an object of values');
   }
 
