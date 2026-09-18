@@ -11,6 +11,16 @@ renderTemplate(values, options)          // mode 3: template rendering
 All three return a `Buffer` when no `output` path is given, and a small
 `{ bytes, ... }` summary when the output was written by the native layer.
 
+## Status
+
+| Mode | Shipped in |
+|------|-----------|
+| `writeTableAsJSON` (new workbook) | 1.1.0 |
+| 1b `writeTableAsJSON({ template })` | 1.2.0 |
+| 2 `updateCells` | 1.2.0 |
+| 3 `renderTemplate` | 1.3.0 |
+| Async twins for the write side, template structure cache | planned |
+
 ## The two requirements: fast and accurate
 
 **Fast.** The reference implementation (`ejsExcel-http`) is slow for structural

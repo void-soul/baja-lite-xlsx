@@ -609,6 +609,153 @@ function updateCells(spec = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Write: template rendering
+// ---------------------------------------------------------------------------
+
+const MAX_TEMPLATE_VALUES = 200000;
+const MAX_TEMPLATE_DEPTH = 12;
+
+/**
+ * Flattens the values object into `path -> primitive`, which is what lets the
+ * renderer stay free of host-language callbacks. Arrays are flattened by index
+ * and get an extra `<path>.length` entry.
+ * @private
+ */
+function flattenTemplateValues(values) {
+  if (values === null || typeof values !== 'object' || Array.isArray(values)) {
+    throw makeError('INVALID_OPTIONS', 'renderTemplate expects an object of values');
+  }
+
+  const flat = {};
+  let count = 0;
+
+  const put = (path, value) => {
+    if (++count > MAX_TEMPLATE_VALUES) {
+      throw makeError(
+        'INVALID_OPTIONS',
+        `template values exceed ${MAX_TEMPLATE_VALUES} entries; flatten them yourself`
+      );
+    }
+    flat[path] = value;
+  };
+
+  const walk = (value, path, depth) => {
+    if (value === undefined) return;
+    if (value === null) {
+      put(path, '');
+      return;
+    }
+    if (Array.isArray(value)) {
+      put(`${path}.length`, value.length);
+      for (let i = 0; i < value.length; i++) {
+        walk(value[i], `${path}.${i}`, depth + 1);
+      }
+      return;
+    }
+    if (value instanceof Date) {
+      put(path, value);
+      return;
+    }
+    if (typeof value === 'object') {
+      if (depth >= MAX_TEMPLATE_DEPTH) {
+        throw makeError('INVALID_OPTIONS', `template values nest deeper than ${MAX_TEMPLATE_DEPTH}`);
+      }
+      for (const key of Object.keys(value)) {
+        if (key.includes('.')) {
+          throw makeError('INVALID_OPTIONS', `template key "${key}" must not contain "."`);
+        }
+        walk(value[key], `${path}.${key}`, depth + 1);
+      }
+      return;
+    }
+    put(path, value); // string | number | boolean
+  };
+
+  for (const key of Object.keys(values)) {
+    if (key.includes('.')) {
+      throw makeError('INVALID_OPTIONS', `template key "${key}" must not contain "."`);
+    }
+    walk(values[key], key, 1);
+  }
+  return flat;
+}
+
+/**
+ * Renders a template workbook.
+ *
+ * Two markers are understood inside cell text:
+ *
+ * - `${path}` — replaces the marker with the value at `path`. Paths walk the
+ *   same object the caller passes (`${user.name}`, `${items.0.amount}`), are
+ *   relative to the current `{{#each}}` item first, and `../name` steps out of
+ *   a loop. `${@index}` is the current 0-based loop index.
+ * - `{{#each path}}` / `{{/each}}` — the rows between the two markers are
+ *   repeated once per item of the array at `path`. The marker cells themselves
+ *   disappear (and a row that only held markers is dropped).
+ *
+ * Repeated rows are produced by copying the template row's XML, so formatting,
+ * styles, row heights, merged cells and conditional formats survive untouched.
+ * Cells are only rewritten when their text contains a marker; everything else,
+ * including every other sheet, is copied byte for byte.
+ *
+ * A `${...}` marker with no value throws `TEMPLATE_ERROR` (pass
+ * `strict: false` to substitute an empty string instead), and an unclosed
+ * `{{#each}}` always throws.
+ *
+ * @param {Object} values - Values to substitute; arrays drive `{{#each}}`.
+ * @param {Object} options
+ * @param {string|Buffer} options.template - Template workbook.
+ * @param {string} [options.sheetName] - Render only this sheet; by default every
+ *   sheet that contains a marker is rendered.
+ * @param {boolean} [options.strict=true] - Throw on unknown `${...}` markers.
+ * @param {string} [options.output] - Write the file natively instead of
+ *   returning a Buffer; the result is then `{ bytes, sheets }`.
+ * @param {number} [options.compression] - 0 (store) .. 9 (max).
+ * @returns {Buffer|{bytes: number, sheets: string[]}}
+ */
+function renderTemplate(values, options = {}) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw makeError('INVALID_OPTIONS', 'options must be an object');
+  }
+
+  const { template, sheetName, strict = true, output, compression } = options;
+
+  if (typeof template !== 'string' && !Buffer.isBuffer(template)) {
+    throw makeError('INVALID_OPTIONS', 'options.template is required (file path or Buffer)');
+  }
+  if (sheetName !== undefined && typeof sheetName !== 'string') {
+    throw makeError('INVALID_OPTIONS', 'options.sheetName must be a string');
+  }
+  if (typeof strict !== 'boolean') {
+    throw makeError('INVALID_OPTIONS', 'options.strict must be a boolean');
+  }
+  if (output !== undefined && typeof output !== 'string') {
+    throw makeError('INVALID_OPTIONS', 'options.output must be a file path');
+  }
+  validateCompression(compression);
+
+  const flat = flattenTemplateValues(values);
+
+  try {
+    return addon.renderTemplate(
+      Buffer.isBuffer(template) ? template : path.resolve(template),
+      flat,
+      {
+        sheetName,
+        strict,
+        output: output === undefined ? undefined : path.resolve(output),
+        compression
+      }
+    );
+  } catch (err) {
+    if (!err.code) {
+      err.code = 'WRITE_FAILED';
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -700,5 +847,6 @@ module.exports = {
   readTableAsJSON,
   readTableAsJSONAsync,
   writeTableAsJSON,
-  updateCells
+  updateCells,
+  renderTemplate
 };

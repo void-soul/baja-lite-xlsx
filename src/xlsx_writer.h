@@ -128,6 +128,11 @@ bool isValidSheetName(const std::string& name, std::string& reason);
 void appendCellXml(std::string& out, const std::string& columnLetters, size_t row,
                    const WriteCell& cell, size_t styleIndex);
 
+// Splits "AB12" into column 28 / row 12 / letters "AB". Returns false when the
+// reference is malformed. Shared by the patching and template modes.
+bool parseA1Reference(const std::string& reference, size_t& column, size_t& row,
+                      std::string& letters);
+
 } // namespace baja_xlsx
 
 #endif // XLSX_WRITER_H

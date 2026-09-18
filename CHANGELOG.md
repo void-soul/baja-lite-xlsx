@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.0 (2026-09-18) — template rendering
+
+New: `renderTemplate(values, options)` — fill a template workbook.
+
+- `${path}` placeholders in cell text, resolved against the current
+  `{{#each}}` item first then from the root; `../name` steps out of a loop and
+  `${@index}` is the 0-based loop index.
+- `{{#each path}}` / `{{/each}}` repeat the rows in between once per array item.
+  A row holding only the marker delimits the block; a marker row that also has
+  data cells is the first repeated row.
+- Repeated rows are copies of the template row's XML, so styles, number
+  formats, row heights, merged cells and conditional formats survive untouched.
+  Only cells whose text contains a marker are rewritten, and sheets without
+  markers are copied as compressed bytes.
+- Values keep their type: numbers are written as numbers (so the template's
+  number format applies) and `Date` values become real Excel dates. A marker
+  with no value throws `TEMPLATE_ERROR` unless `strict: false` is passed.
+- Package plumbing (part lookup, compressed-entry copy, assembly) is now shared
+  by all three write modes instead of living inside the patching code.
+
 ## 1.2.0 (2026-09-18) — writing into existing workbooks
 
 - `writeTableAsJSON(rows, { template })`: writes into an existing workbook,

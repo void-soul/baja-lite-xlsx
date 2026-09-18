@@ -201,6 +201,33 @@ const patched = updateCells({
 里残留的公式会被清除而不是留下过期值；不存在单元格/行会按列序、行序正确插入。未被
 列出的内容保持逐字节不变。
 
+### 模板渲染
+
+```javascript
+const { renderTemplate } = require('baja-lite-xlsx');
+
+// 模板单元格内容示例："报表 ${title}"、"{{#each items}}" / "{{/each}}"、"${name}"
+const buffer = renderTemplate(
+  { title: '一季度', items: [{ name: '甲', amount: 1 }, { name: '乙', amount: 2 }] },
+  { template: 'report-template.xlsx' }
+);
+```
+
+单元格文本里支持两种标记：
+
+| 标记 | 含义 |
+|------|------|
+| `${path}` | 取 `path` 处的值（`${user.name}`、`${items.0.amount}`）。优先在当前 `{{#each}}` 项内查找，其次从根查找；`../name` 跳出循环，`${@index}` 是当前 0 起的循环下标。 |
+| `{{#each path}}` … `{{/each}}` | 两个标记之间的行按 `path` 数组逐项重复。 |
+
+重复行是**复制模板行的 XML**生成的，因此样式、数字格式、行高、合并单元格、条件格式
+都原样保留。只有文本含标记的单元格会被重写（且保留其样式），不含标记的工作表整表
+按字节搬运。
+
+只含标记的行视为分隔行；若 `{{#each}}` 所在行还有数据单元格，则该行就是第一条被
+重复的行。找不到值的标记会抛 `TEMPLATE_ERROR`（传 `strict: false` 则写为空串），
+`{{#each}}` 未闭合一定报错。
+
 ## 性能
 
 读取过程只做你要求的那部分工作：

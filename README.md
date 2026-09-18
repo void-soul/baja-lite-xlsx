@@ -214,6 +214,35 @@ unless the update supplies a `numberFormat`, formulas in a patched cell are
 dropped rather than left stale, and missing cells or rows are inserted in the
 right order. Everything not listed stays byte-identical.
 
+### Templates
+
+```javascript
+const { renderTemplate } = require('baja-lite-xlsx');
+
+// Template cells: "Report ${title}", "{{#each items}}" / "{{/each}}", "${name}"
+const buffer = renderTemplate(
+  { title: 'Q1', items: [{ name: 'a', amount: 1 }, { name: 'b', amount: 2 }] },
+  { template: 'report-template.xlsx' }
+);
+```
+
+Two markers are understood inside cell text:
+
+| Marker | Meaning |
+|--------|---------|
+| `${path}` | The value at `path` (`${user.name}`, `${items.0.amount}`). Resolved against the current `{{#each}}` item first, then from the root; `../name` steps out of a loop and `${@index}` is the 0-based loop index. |
+| `{{#each path}}` … `{{/each}}` | The rows between the markers repeat once per item of the array at `path`. |
+
+Repeated rows are copies of the template row's XML, so styles, number formats,
+row heights, merged cells and conditional formats survive untouched. Only cells
+whose text contains a marker are rewritten; a cell keeps its style, and every
+sheet without markers is copied byte for byte.
+
+A row holding nothing but the marker delimits the block; a marker row that also
+carries data cells is the first repeated row. A marker with no matching value
+throws `TEMPLATE_ERROR` (pass `strict: false` to write an empty string instead),
+and an unclosed `{{#each}}` always throws.
+
 ## Performance
 
 The reader only does work you asked for:

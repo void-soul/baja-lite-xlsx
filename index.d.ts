@@ -263,4 +263,59 @@ declare module 'baja-lite-xlsx' {
    */
   export function updateCells(options: UpdateCellsOptions & { output: string }): UpdateCellsResult;
   export function updateCells(options: UpdateCellsOptions): Buffer;
+
+  export interface RenderTemplateOptions {
+    /** Template workbook (path or bytes). */
+    template: string | Buffer;
+    /**
+     * Render only this sheet. By default every sheet containing a marker is
+     * rendered; sheets without markers are copied untouched.
+     */
+    sheetName?: string;
+    /**
+     * Throw `TEMPLATE_ERROR` when a `${...}` marker has no value (default), or
+     * substitute an empty string when false.
+     */
+    strict?: boolean;
+    /** Write the file natively instead of returning a Buffer. */
+    output?: string;
+    /** Compression level: 0 (store) .. 9 (maximum). Default: 6. */
+    compression?: number;
+  }
+
+  export interface RenderTemplateResult {
+    /** Size of the written package in bytes. */
+    bytes: number;
+    /** Worksheet parts that were rewritten. */
+    sheets: string[];
+  }
+
+  /**
+   * Renders a template workbook.
+   *
+   * Supported markers inside cell text:
+   *
+   * - `${path}` — value at `path` (`${user.name}`, `${items.0.amount}`),
+   *   resolved against the current `{{#each}}` item first; `../name` steps out
+   *   of a loop and `${@index}` is the 0-based loop index.
+   * - `{{#each path}}` / `{{/each}}` — the rows between the markers repeat once
+   *   per array item. Marker cells are removed, and a row that only held
+   *   markers disappears.
+   *
+   * Repeated rows are copies of the template row XML, so styles, number
+   * formats, row heights, merged cells and conditional formats are preserved.
+   * Cells without markers, and every other part of the package, stay
+   * byte-identical.
+   *
+   * @throws Error with a `code` property: INVALID_OPTIONS / FILE_OPEN_FAILED /
+   *   SHEET_NOT_FOUND / TEMPLATE_ERROR / FILE_WRITE_FAILED / WRITE_FAILED.
+   */
+  export function renderTemplate(
+    values: Record<string, unknown>,
+    options: RenderTemplateOptions & { output: string }
+  ): RenderTemplateResult;
+  export function renderTemplate(
+    values: Record<string, unknown>,
+    options: RenderTemplateOptions
+  ): Buffer;
 }

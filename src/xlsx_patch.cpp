@@ -11,7 +11,10 @@
 
 namespace baja_xlsx {
 
-namespace {
+// Shared package plumbing: locating parts and assembling an archive. Used by
+// every write mode, so it lives in its own namespace instead of being local to
+// this file (see xlsx_patch.h).
+namespace pkg {
 
 // ---------------------------------------------------------------------------
 // Package access
@@ -175,6 +178,42 @@ bool findSheetPart(zip_t* archive, const std::string& sheetName, std::string& pa
     error = "SHEET_NOT_FOUND|Sheet \"" + sheetName + "\" not found in the template";
     return false;
 }
+
+// Every worksheet part, in workbook order. Needed by the template mode, which
+// renders all sheets unless the caller names one.
+bool listWorksheetParts(zip_t* archive, std::vector<std::string>& parts, std::string& error) {
+    std::string workbook;
+    if (!readEntry(archive, "xl/workbook.xml", workbook, error)) return false;
+    std::string rels;
+    if (!readEntry(archive, "xl/_rels/workbook.xml.rels", rels, error)) return false;
+
+    const std::map<std::string, std::string> relationships = parseRelationshipTargets(rels);
+    parts.clear();
+
+    size_t pos = 0;
+    while (true) {
+        const size_t elementStart = xmlp::findTagOpen(workbook, "sheet", pos);
+        if (elementStart == std::string::npos) break;
+        pos = elementStart + 5;
+
+        std::string relationshipId;
+        xmlp::getAttribute(workbook, elementStart, "r:id", relationshipId);
+        auto it = relationships.find(relationshipId);
+        if (relationshipId.empty() || it == relationships.end()) continue;
+
+        std::string part;
+        if (resolvePartName(archive, it->second, part)) {
+            parts.push_back(part);
+        }
+    }
+    return true;
+}
+
+} // namespace pkg
+
+using namespace pkg;
+
+namespace {
 
 // ---------------------------------------------------------------------------
 // styles.xml patching
@@ -522,15 +561,13 @@ void dropDimensionElement(std::string& xml) {
     xml.erase(start, close + 12 - start);
 }
 
-// ---------------------------------------------------------------------------
-// Package assembly
-// ---------------------------------------------------------------------------
+} // namespace
 
-struct Replacement {
-    std::string name;
-    const std::string* content = nullptr;
-    const std::function<bool(std::string& chunk)>* stream = nullptr;
-};
+namespace pkg {
+
+// ---------------------------------------------------------------------------
+// Package assembly (Replacement is declared in the header)
+// ---------------------------------------------------------------------------
 
 // Copies every part of the template, substituting the listed ones. Untouched
 // parts travel as compressed bytes: no recompression, no re-serialization.
@@ -597,16 +634,7 @@ bool openTemplate(const TemplateSource& source, zip_t*& archive, std::string& er
     return true;
 }
 
-class ArchiveCloser {
-public:
-    explicit ArchiveCloser(zip_t* archive) : archive_(archive) {}
-    ~ArchiveCloser() {
-        if (archive_) zip_close(archive_);
-    }
-
-private:
-    zip_t* archive_;
-};
+// ArchiveCloser lives in the header so every write mode shares it.
 
 std::vector<std::string> sortedUnique(std::vector<std::string> values) {
     values.erase(std::remove(values.begin(), values.end(), std::string()), values.end());
@@ -615,7 +643,7 @@ std::vector<std::string> sortedUnique(std::vector<std::string> values) {
     return values;
 }
 
-} // namespace
+} // namespace pkg
 
 bool replaceSheetData(const TemplateSource& source, const WritePlan& plan, RowSource& table,
                       zipio::ZipWriter::Compression compression, std::vector<uint8_t>& out,

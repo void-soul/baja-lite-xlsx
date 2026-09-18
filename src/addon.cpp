@@ -2,6 +2,7 @@
 #include "path_util.h"
 #include "xlsx_patch.h"
 #include "xlsx_reader.h"
+#include "xlsx_template.h"
 #include "xlsx_writer.h"
 
 #include <cmath>
@@ -1053,6 +1054,92 @@ Value WriteCells(const CallbackInfo& info) {
 }
 
 // ---------------------------------------------------------------------------
+// Writing: template rendering (mode 3). Values arrive flattened (path ->
+// primitive), so the renderer never has to call back into JS.
+// ---------------------------------------------------------------------------
+
+void readTemplateValues(const Object& source, TemplateValues& out) {
+    Napi::Array keys = source.GetPropertyNames();
+    const uint32_t count = keys.Length();
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const Value key = keys.Get(i);
+        if (!key.IsString()) continue;
+
+        const WriteCell cell = toWriteCell(source.Get(key));
+        TemplateValue value;
+        switch (cell.kind) {
+            case WriteCell::Kind::Number:
+                value.kind = TemplateValue::Kind::Number;
+                value.number = cell.number;
+                break;
+            case WriteCell::Kind::Boolean:
+                value.kind = TemplateValue::Kind::Boolean;
+                value.boolean = cell.boolean;
+                break;
+            case WriteCell::Kind::Text:
+            case WriteCell::Kind::Empty:
+                value.kind = TemplateValue::Kind::Text;
+                value.text = cell.text;
+                break;
+        }
+        out.emplace(key.As<String>().Utf8Value(), std::move(value));
+    }
+}
+
+Value RenderTemplate(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    if (info.Length() < 2 || !info[1].IsObject()) {
+        return failWith(env,
+                        "INVALID_OPTIONS|renderTemplate expects a template and a values object");
+    }
+
+    TemplateArgument templateArg;
+    const Value templateValue = info[0];
+    if (templateValue.IsString()) {
+        templateArg.present = true;
+        templateArg.path = templateValue.As<String>().Utf8Value();
+    } else if (templateValue.IsBuffer()) {
+        templateArg.present = true;
+        Buffer<uint8_t> buffer = templateValue.As<Buffer<uint8_t>>();
+        templateArg.bytes.assign(buffer.Data(), buffer.Data() + buffer.Length());
+    } else {
+        return failWith(env, "INVALID_OPTIONS|options.template is required (file path or Buffer)");
+    }
+
+    TemplateValues values;
+    readTemplateValues(info[1].As<Object>(), values);
+
+    Object options = (info.Length() > 2 && info[2].IsObject()) ? info[2].As<Object>()
+                                                               : Object::New(env);
+    TemplatePlan plan;
+    if (options.Has("sheetName")) {
+        const Value value = options.Get("sheetName");
+        if (value.IsString()) plan.sheetName = value.As<String>().Utf8Value();
+    }
+    if (options.Has("strict")) {
+        const Value value = options.Get("strict");
+        if (value.IsBoolean()) plan.strict = value.As<Boolean>().Value();
+    }
+
+    std::vector<uint8_t> out;
+    std::vector<std::string> renderedSheets;
+    std::string error;
+    if (!renderTemplate(templateArg.source(), values, plan, readCompression(options), out,
+                        renderedSheets, error)) {
+        return failWith(env, error.empty() ? "WRITE_FAILED|Failed to render the template" : error);
+    }
+    if (hasPendingException(env)) {
+        return env.Null();
+    }
+
+    Object summary = Object::New(env);
+    summary.Set("sheets", stringArray(env, renderedSheets));
+    return finishWrite(env, out, readOutputPath(options), summary);
+}
+
+// ---------------------------------------------------------------------------
 // Init. The former native `extractImages` export is removed: it was a
 // placeholder that always returned [] silently (AUDIT-20260917-012).
 // ---------------------------------------------------------------------------
@@ -1064,6 +1151,7 @@ Object Init(Env env, Object exports) {
     exports.Set("readExcelBatchedAsync", Function::New(env, ReadExcelBatchedAsync));
     exports.Set("writeExcel", Function::New(env, WriteExcel));
     exports.Set("writeCells", Function::New(env, WriteCells));
+    exports.Set("renderTemplate", Function::New(env, RenderTemplate));
     return exports;
 }
 

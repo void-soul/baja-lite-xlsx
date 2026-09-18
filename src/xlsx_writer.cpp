@@ -1,6 +1,7 @@
 #include "xlsx_writer.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -198,6 +199,32 @@ std::string columnLetters(size_t index) {
         index = (index - 1) / 26;
     }
     return name;
+}
+
+bool parseA1Reference(const std::string& reference, size_t& column, size_t& row,
+                      std::string& letters) {
+    size_t i = 0;
+    letters.clear();
+    while (i < reference.size() && std::isalpha(static_cast<unsigned char>(reference[i]))) {
+        letters.push_back(static_cast<char>(
+            std::toupper(static_cast<unsigned char>(reference[i]))));
+        ++i;
+    }
+    if (letters.empty() || i >= reference.size()) return false;
+
+    size_t value = 0;
+    while (i < reference.size() && std::isdigit(static_cast<unsigned char>(reference[i]))) {
+        value = value * 10 + static_cast<size_t>(reference[i] - '0');
+        ++i;
+    }
+    if (value == 0 || i != reference.size()) return false;
+
+    column = 0;
+    for (char c : letters) {
+        column = column * 26 + static_cast<size_t>(c - 'A' + 1);
+    }
+    row = value;
+    return true;
 }
 
 std::string formatNumber(double value) {

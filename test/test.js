@@ -16,7 +16,8 @@ const {
   readTableAsJSON,
   readTableAsJSONAsync,
   writeTableAsJSON,
-  updateCells
+  updateCells,
+  renderTemplate
 } = require('..');
 
 const fixturesDir = path.join(__dirname, '..', 'examples');
@@ -407,6 +408,129 @@ test('a missing template reports a coded error', null, () => {
   assert.throws(
     () => writeTableAsJSON([{ a: 1 }], { template: 'definitely-not-here-88.xlsx' }),
     (err) => err.code === 'FILE_OPEN_FAILED' || err.code === 'FILE_NOT_FOUND'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Write: template rendering (mode 3)
+// ---------------------------------------------------------------------------
+
+let templateCounter = 0;
+
+// Templates are built with our own writer, so the tests exercise the full
+// round trip: write a template, render it, read the result back.
+function makeTemplate(rows, columns) {
+  ensureOutputDir();
+  templateCounter += 1;
+  const target = path.join(outputDir, `template-${templateCounter}.xlsx`);
+  writeTableAsJSON(rows, { columns, includeHeader: false, output: target });
+  return target;
+}
+
+test('renderTemplate fills placeholders', null, () => {
+  const template = makeTemplate(
+    [['label', 'value'], ['Report ${title}', '${total}']],
+    [{}, {}]
+  );
+  const buffer = renderTemplate({ title: 'Q1', total: 42 }, { template });
+  assert.deepEqual(readTableAsJSON(buffer), [{ label: 'Report Q1', value: '42' }]);
+});
+
+test('renderTemplate repeats rows for {{#each}}', null, () => {
+  const template = makeTemplate(
+    [
+      ['name', 'amount'],
+      ['{{#each items}}', ''],
+      ['${name}', '${amount}'],
+      ['{{/each}}', '']
+    ],
+    [{}, {}]
+  );
+  const buffer = renderTemplate(
+    {
+      items: [
+        { name: 'a', amount: 1 },
+        { name: 'b', amount: 2 },
+        { name: 'c', amount: 3 }
+      ]
+    },
+    { template }
+  );
+  assert.deepEqual(readTableAsJSON(buffer), [
+    { name: 'a', amount: '1' },
+    { name: 'b', amount: '2' },
+    { name: 'c', amount: '3' }
+  ]);
+});
+
+test('renderTemplate supports @index and shorthand ${.}', null, () => {
+  const template = makeTemplate(
+    [['no', 'name'], ['{{#each items}}', ''], ['${@index}', '${.}'], ['{{/each}}', '']],
+    [{}, {}]
+  );
+  const filled = renderTemplate({ items: ['x', 'y'] }, { template });
+  assert.deepEqual(readTableAsJSON(filled), [{ no: '0', name: 'x' }, { no: '1', name: 'y' }]);
+
+  const empty = renderTemplate({ items: [] }, { template });
+  assert.deepEqual(readTableAsJSON(empty), []);
+});
+
+test('renderTemplate keeps the template number format for dates', null, () => {
+  const template = makeTemplate([['when'], ['${when}']], [{ numberFormat: 'yyyy-mm-dd' }]);
+  const buffer = renderTemplate({ when: new Date(2026, 0, 15) }, { template });
+  assert.deepEqual(readTableAsJSON(buffer), [{ when: '2026-01-15' }]);
+});
+
+test('renderTemplate steps out of a loop with ../', null, () => {
+  const template = makeTemplate(
+    [
+      ['title', 'name'],
+      ['{{#each items}}', ''],
+      ['${../title}', '${name}'],
+      ['{{/each}}', '']
+    ],
+    [{}, {}]
+  );
+  const buffer = renderTemplate({ title: 'T', items: [{ name: 'a' }] }, { template });
+  assert.deepEqual(readTableAsJSON(buffer), [{ title: 'T', name: 'a' }]);
+});
+
+test('unknown placeholder -> TEMPLATE_ERROR, strict false -> empty', null, () => {
+  const template = makeTemplate([['a'], ['${nope}']], [{}]);
+  assert.throws(
+    () => renderTemplate({ other: 1 }, { template }),
+    (err) => err.code === 'TEMPLATE_ERROR'
+  );
+  const lenient = renderTemplate({ other: 1 }, { template, strict: false });
+  assert.deepEqual(readTableAsJSON(lenient), [{ a: '' }]);
+});
+
+test('an unclosed {{#each}} -> TEMPLATE_ERROR', null, () => {
+  const template = makeTemplate([['a'], ['{{#each items}}'], ['${.}']], [{}]);
+  assert.throws(
+    () => renderTemplate({ items: ['x'] }, { template }),
+    (err) => err.code === 'TEMPLATE_ERROR'
+  );
+});
+
+test('renderTemplate writes to a file when asked', null, () => {
+  const template = makeTemplate([['a'], ['${v}']], [{}]);
+  ensureOutputDir();
+  const target = path.join(outputDir, 'rendered.xlsx');
+  if (fs.existsSync(target)) fs.unlinkSync(target);
+  const summary = renderTemplate({ v: 'ok' }, { template, output: target });
+  assert.ok(fs.existsSync(target));
+  assert.ok(summary.bytes > 0);
+  assert.ok(Array.isArray(summary.sheets));
+  assert.deepEqual(readTableAsJSON(target), [{ a: 'ok' }]);
+});
+
+test('bad render specs -> INVALID_OPTIONS', null, () => {
+  assert.throws(() => renderTemplate('nope', {}), (err) => err.code === 'INVALID_OPTIONS');
+  assert.throws(() => renderTemplate({}, {}), (err) => err.code === 'INVALID_OPTIONS');
+  assert.throws(
+    () => renderTemplate({ a: [{ 'bad.key': 1 }] }, { template: 'x.xlsx' }),
+    (err) => err.code === 'INVALID_OPTIONS'
   );
 });
 
