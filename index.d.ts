@@ -300,6 +300,15 @@ declare module 'baja-lite-xlsx' {
      * substitute an empty string when false.
      */
     strict?: boolean;
+    /**
+     * Keep the parsed template structure (row layout, marker positions, shared
+     * strings) in a bounded in-process cache — useful when the same template is
+     * rendered repeatedly, as in a report server. Entries are keyed by the
+     * template's identity (path + size + mtime, or a content hash for Buffers)
+     * plus the sheet filter, so a rewritten template is picked up automatically.
+     * The cache holds at most 8 templates / 64 MB. Default: false.
+     */
+    cache?: boolean;
     /** Write the file natively instead of returning a Buffer. */
     output?: string;
     /** Compression level: 0 (store) .. 9 (maximum). Default: 6. */

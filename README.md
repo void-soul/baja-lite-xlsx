@@ -238,10 +238,27 @@ row heights, merged cells and conditional formats survive untouched. Only cells
 whose text contains a marker are rewritten; a cell keeps its style, and every
 sheet without markers is copied byte for byte.
 
+A marker may live in the cell itself or in `sharedStrings` — the way Excel
+stores cell text — so templates authored in Excel work unchanged.
+
 A row holding nothing but the marker delimits the block; a marker row that also
 carries data cells is the first repeated row. A marker with no matching value
 throws `TEMPLATE_ERROR` (pass `strict: false` to write an empty string instead),
 and an unclosed `{{#each}}` always throws.
+
+#### Reusing a template: `cache: true`
+
+```javascript
+// A report server rendering the same template over and over
+const filled = await renderTemplateAsync(values, { template, cache: true });
+```
+
+The parsed template structure — row layout, marker positions and the shared
+string table — is kept in a bounded in-process cache (8 templates / 64 MB, LRU),
+so a repeat render skips reading and scanning the template altogether. Entries
+are keyed by the template's identity (path + size + mtime, or a content hash for
+Buffers) plus the sheet filter, so a rewritten template is picked up
+automatically. Default: `false`.
 
 ### Asynchronous writes
 

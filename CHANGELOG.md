@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.5.0 (2026-09-18) — template cache, Excel-authored templates
+
+Fixed (both found by a new local harness that renders an Excel-style template,
+see `docs/local/cachecheck.cpp`, and now covered in CI by
+`test/fixtures/template-shared-strings.xlsx`):
+
+- A template authored in Excel keeps its cell text in `sharedStrings`, so its
+  sheet XML contains no marker at all. The "does this sheet need rendering?"
+  check only looked at the sheet XML, so such a sheet was copied verbatim and
+  every marker stayed in the output. The shared string table is now consulted
+  too.
+- Shared string references (`t="s"`) were decoded one byte too long, so the
+  index never parsed and the cell text was never substituted.
+
+New:
+
+- `renderTemplate(values, { cache: true })`: the parsed template structure (row
+  layout, marker positions, shared strings) stays in a bounded in-process LRU
+  cache (8 entries / 64 MB) keyed by template identity plus the sheet filter, so
+  a repeat render skips reading and scanning the template. Mutex-protected, so
+  the async twin benefits as well.
+- `bench/` now also measures the write side (`--rows` to size the workload):
+  sync/async sheet writes, writing to a file, cell patching, and template
+  rendering with and without the cache.
+
 ## 1.4.0 (2026-09-18) — asynchronous writes
 
 - `writeTableAsJSONAsync`, `updateCellsAsync`, `renderTemplateAsync`: the JS

@@ -4,7 +4,11 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <list>
 #include <map>
+#include <memory>
+#include <mutex>
 
 #include "xml_parsers.h"
 
@@ -209,7 +213,8 @@ std::string cellText(const std::string& xml, const ElementSpan& cell,
     if (type == "s") {
         ElementSpan v;
         if (findElement(xml, "v", cell.openEnd, v) && v.start < cell.end) {
-            const std::string raw = trimmed(xml.substr(v.openEnd + 1, v.end - v.openEnd - 4));
+            // inner length = end - (openEnd + 1) - len("</v>")
+            const std::string raw = trimmed(xml.substr(v.openEnd + 1, v.end - v.openEnd - 5));
             if (!raw.empty() &&
                 std::all_of(raw.begin(), raw.end(),
                             [](char c) { return c >= '0' && c <= '9'; })) {
@@ -225,7 +230,7 @@ std::string cellText(const std::string& xml, const ElementSpan& cell,
     if (type == "str") {
         ElementSpan v;
         if (findElement(xml, "v", cell.openEnd, v) && v.start < cell.end) {
-            return unescapeXml(xml.substr(v.openEnd + 1, v.end - v.openEnd - 4));
+            return unescapeXml(xml.substr(v.openEnd + 1, v.end - v.openEnd - 5));
         }
     }
     return std::string();
@@ -431,6 +436,78 @@ std::string rebuiltCell(const std::string& reference, const std::string& styleAt
     return cell;
 }
 
+// ---------------------------------------------------------------------------
+// Parsed template structure
+// ---------------------------------------------------------------------------
+//
+// Reading a template means decompressing its sheets and scanning every row for
+// markers. That layout cannot change while the file does not, so it is kept
+// apart from the per-render work (substitute values, deflate, assemble) and can
+// be cached -- see TemplateCache.
+
+// One sheet's parsed structure. `xml` owns the bytes `rows` points into, so the
+// two must travel together.
+struct CachedSheet {
+    std::string part;
+    std::string xml;
+    std::vector<ElementSpan> rows;
+    std::vector<Marker> markers;
+};
+
+struct CachedTemplate {
+    std::vector<std::string> sharedStrings;
+    std::vector<CachedSheet> sheets; // only the sheets that carry markers
+    size_t bytes = 0;
+};
+
+// A sheet needs rendering when it contains a marker, either inline or -- the
+// way Excel writes it -- inside a shared string.
+bool hasMarkers(const std::string& text) {
+    return text.find("${") != std::string::npos || text.find("{{") != std::string::npos;
+}
+
+bool hasMarkers(const std::vector<std::string>& sharedStrings) {
+    for (const std::string& text : sharedStrings) {
+        if (hasMarkers(text)) return true;
+    }
+    return false;
+}
+
+// Splits a sheet into its rows and records which row holds which marker. Runs
+// once per template per cache life, instead of once per render.
+void splitSheet(const std::string& sheetXml, const std::vector<std::string>& sharedStrings,
+                std::vector<ElementSpan>& rows, std::vector<Marker>& markers) {
+    rows.clear();
+    markers.clear();
+
+    ElementSpan sheetData;
+    if (!findElement(sheetXml, "sheetData", 0, sheetData)) return;
+
+    size_t pos = sheetData.openEnd + 1;
+    while (!sheetData.selfClosing) {
+        ElementSpan row;
+        if (!findElement(sheetXml, "row", pos, row)) break;
+        if (row.start >= sheetData.end) break;
+        pos = row.end;
+        rows.push_back(row);
+    }
+
+    markers.resize(rows.size());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        for (size_t cellPos = rows[i].openEnd + 1; cellPos < rows[i].end;) {
+            ElementSpan cell;
+            if (!findElement(sheetXml, "c", cellPos, cell)) break;
+            if (cell.start >= rows[i].end) break;
+            cellPos = cell.end;
+            const Marker marker = classifyMarker(cellText(sheetXml, cell, sharedStrings));
+            if (marker.kind != MarkerKind::None) {
+                markers[i] = marker;
+                break;
+            }
+        }
+    }
+}
+
 struct RenderContext {
     const TemplateValues& values;
     const TemplatePlan& plan;
@@ -582,39 +659,17 @@ size_t loopCount(const TemplateValues& values, const std::string& path) {
     return any ? maxIndex + 1 : 0;
 }
 
-bool renderSheet(RenderContext& context, const std::string& sheetXml, std::string& out) {
+bool renderSheet(RenderContext& context, const CachedSheet& cached, std::string& out) {
+    // The row layout and marker positions were split once, when the template
+    // structure was built or came out of the cache.
+    const std::string& sheetXml = cached.xml;
+    const std::vector<ElementSpan>& rows = cached.rows;
+    const std::vector<Marker>& markers = cached.markers;
+
     ElementSpan sheetData;
     if (!findElement(sheetXml, "sheetData", 0, sheetData)) {
         out = sheetXml; // nothing to render
         return true;
-    }
-
-    // Collect the template rows once; the loop walk then indexes into them.
-    std::vector<ElementSpan> rows;
-    {
-        size_t pos = sheetData.openEnd + 1;
-        while (!sheetData.selfClosing) {
-            ElementSpan row;
-            if (!findElement(sheetXml, "row", pos, row)) break;
-            if (row.start >= sheetData.end) break;
-            pos = row.end;
-            rows.push_back(row);
-        }
-    }
-
-    std::vector<Marker> markers(rows.size());
-    for (size_t i = 0; i < rows.size(); ++i) {
-        for (size_t pos = rows[i].openEnd + 1; pos < rows[i].end;) {
-            ElementSpan cell;
-            if (!findElement(sheetXml, "c", pos, cell)) break;
-            if (cell.start >= rows[i].end) break;
-            pos = cell.end;
-            const Marker marker = classifyMarker(cellText(sheetXml, cell, context.sharedStrings));
-            if (marker.kind != MarkerKind::None) {
-                markers[i] = marker;
-                break;
-            }
-        }
     }
 
     std::string rendered;
@@ -691,17 +746,11 @@ bool renderSheet(RenderContext& context, const std::string& sheetXml, std::strin
     return true;
 }
 
-} // namespace
-
-bool renderTemplate(const TemplateSource& source, const TemplateValues& values,
-                    const TemplatePlan& plan, zipio::ZipWriter::Compression compression,
-                    std::vector<uint8_t>& out, std::vector<std::string>& renderedSheets,
-                    std::string& error) {
-    zip_t* archive = nullptr;
-    if (!pkg::openTemplate(source, archive, error)) return false;
-    pkg::ArchiveCloser closer(archive);
-
-    renderedSheets.clear();
+// Reads and splits the sheets that carry markers. Sheets without markers are
+// left out entirely, so they are copied verbatim during assembly and a report
+// template that only fills one sheet keeps every other sheet byte-identical.
+bool buildTemplateStructure(zip_t* archive, const TemplatePlan& plan, CachedTemplate& out,
+                            std::string& error) {
     std::vector<std::string> candidates;
     if (!plan.sheetName.empty()) {
         std::string part;
@@ -711,35 +760,175 @@ bool renderTemplate(const TemplateSource& source, const TemplateValues& values,
         return false;
     }
 
-    std::vector<std::string> sharedStrings;
-    {
-        std::string sharedXml;
-        std::string ignored;
-        if (pkg::readEntry(archive, "xl/sharedStrings.xml", sharedXml, ignored)) {
-            sharedStrings = parseSharedStrings(sharedXml);
+    std::string sharedXml;
+    std::string ignored;
+    if (pkg::readEntry(archive, "xl/sharedStrings.xml", sharedXml, ignored)) {
+        out.sharedStrings = parseSharedStrings(sharedXml);
+        out.bytes += sharedXml.size();
+    }
+
+    // A template authored in Excel keeps its cell text -- markers included --
+    // in sharedStrings, so the sheet XML alone cannot tell whether it needs
+    // rendering. When the shared table carries markers every candidate has to be
+    // scanned; otherwise the cheap inline check is enough and marker-free sheets
+    // are copied verbatim.
+    const bool sharedHasMarkers = hasMarkers(out.sharedStrings);
+
+    for (const std::string& part : candidates) {
+        std::string sheetXml;
+        if (!pkg::readEntry(archive, part, sheetXml, error)) return false;
+        if (!sharedHasMarkers && !hasMarkers(sheetXml)) {
+            continue;
         }
+
+        CachedSheet sheet;
+        sheet.part = part;
+        sheet.xml = std::move(sheetXml);
+        splitSheet(sheet.xml, out.sharedStrings, sheet.rows, sheet.markers);
+
+        out.bytes += sheet.xml.size() +
+                     sheet.rows.size() * sizeof(ElementSpan) +
+                     sheet.markers.size() * sizeof(Marker);
+        out.sheets.push_back(std::move(sheet));
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Template cache
+// ---------------------------------------------------------------------------
+
+// A path is identified by its size and modification time, so rewriting the file
+// drops the entry; bytes are identified by size plus a content hash. Rendering
+// with a different sheet filter is a different structure, hence the suffix.
+std::string templateIdentity(const TemplateSource& source, const std::string& sheetFilter) {
+    std::string key;
+    if (source.path) {
+        key = "path:" + *source.path;
+        std::error_code code;
+        const std::uintmax_t size = std::filesystem::file_size(*source.path, code);
+        if (!code) {
+            key += ":" + std::to_string(size);
+            const auto stamp = std::filesystem::last_write_time(*source.path, code);
+            if (!code) {
+                key += ":" + std::to_string(stamp.time_since_epoch().count());
+            }
+        }
+    } else if (source.bytes) {
+        // FNV-1a: cheap, and the template is already in memory.
+        uint64_t hash = 1469598103934665603ull;
+        for (uint8_t byte : *source.bytes) {
+            hash = (hash ^ byte) * 1099511628211ull;
+        }
+        key = "bytes:" + std::to_string(source.bytes->size()) + ":" + std::to_string(hash);
+    } else {
+        return std::string();
+    }
+
+    if (!sheetFilter.empty()) {
+        key += "|sheet:" + sheetFilter;
+    }
+    return key;
+}
+
+// Bounded LRU of parsed templates. Shared by every render -- including the
+// async workers, which is why it is mutex-protected -- and evicted by both entry
+// count and total bytes, so a big template cannot pin memory forever.
+class TemplateCache {
+public:
+    static constexpr size_t kMaxEntries = 8;
+    static constexpr size_t kMaxBytes = 64u * 1024u * 1024u;
+
+    std::shared_ptr<const CachedTemplate> get(const std::string& key) {
+        if (key.empty()) return nullptr;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+            if (it->first != key) continue;
+            // Promote to most-recently-used.
+            entries_.splice(entries_.begin(), entries_, it);
+            return entries_.front().second;
+        }
+        return nullptr;
+    }
+
+    void put(const std::string& key, const std::shared_ptr<CachedTemplate>& entry) {
+        if (key.empty() || !entry || entry->sheets.empty() || entry->bytes > kMaxBytes) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+            if (it->first != key) continue;
+            bytes_ -= it->second->bytes;
+            entries_.erase(it);
+            break;
+        }
+
+        entries_.push_front(std::make_pair(key, std::shared_ptr<const CachedTemplate>(entry)));
+        bytes_ += entry->bytes;
+
+        while (entries_.size() > kMaxEntries || bytes_ > kMaxBytes) {
+            if (entries_.empty()) break;
+            bytes_ -= entries_.back().second->bytes;
+            entries_.pop_back();
+        }
+    }
+
+    size_t entries() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return entries_.size();
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::list<std::pair<std::string, std::shared_ptr<const CachedTemplate>>> entries_;
+    size_t bytes_ = 0;
+};
+
+TemplateCache& templateCache() {
+    // Function-local static: created on first use, destroyed at exit.
+    static TemplateCache cache;
+    return cache;
+}
+
+} // namespace
+
+bool renderTemplate(const TemplateSource& source, const TemplateValues& values,
+                    const TemplatePlan& plan, zipio::ZipWriter::Compression compression,
+                    std::vector<uint8_t>& out, std::vector<std::string>& renderedSheets,
+                    std::string& error) {
+    const std::string key = plan.cache ? templateIdentity(source, plan.sheetName) : std::string();
+    std::shared_ptr<const CachedTemplate> structure;
+    if (!key.empty()) {
+        structure = templateCache().get(key);
+    }
+
+    renderedSheets.clear();
+    zip_t* archive = nullptr;
+    if (!pkg::openTemplate(source, archive, error)) return false;
+    pkg::ArchiveCloser closer(archive);
+
+    if (!structure) {
+        auto built = std::make_shared<CachedTemplate>();
+        if (!buildTemplateStructure(archive, plan, *built, error)) return false;
+        if (!key.empty()) {
+            templateCache().put(key, built);
+        }
+        structure = std::move(built);
     }
 
     std::vector<std::string> parts;
     std::vector<std::string> contents;
-    for (const std::string& part : candidates) {
-        std::string sheetXml;
-        if (!pkg::readEntry(archive, part, sheetXml, error)) return false;
-
-        // Sheets without markers are copied verbatim, so a report template that
-        // only fills one sheet keeps every other sheet byte-identical.
-        if (sheetXml.find("${") == std::string::npos && sheetXml.find("{{") == std::string::npos) {
-            continue;
-        }
-
-        RenderContext context{values, plan, sharedStrings, part, std::string(), true};
+    for (const CachedSheet& sheet : structure->sheets) {
+        RenderContext context{values, plan, structure->sharedStrings, sheet.part, std::string(),
+                              true};
         std::string rendered;
-        if (!renderSheet(context, sheetXml, rendered)) {
+        if (!renderSheet(context, sheet, rendered)) {
             error = context.error;
             return false;
         }
 
-        parts.push_back(part);
+        parts.push_back(sheet.part);
         contents.push_back(std::move(rendered));
     }
 

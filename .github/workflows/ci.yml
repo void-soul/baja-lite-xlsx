@@ -20,7 +20,7 @@ jobs:
       - run: npm install --ignore-scripts
       - name: Syntax-check all JS files
         run: |
-          for f in index.js test/test.js scripts/*.js scripts/lib/*.js examples/*.js; do
+          for f in index.js test/test.js bench/*.js scripts/*.js scripts/lib/*.js examples/*.js; do
             if [ -f "$f" ]; then node --check "$f"; fi
           done
       - name: Typecheck declarations
@@ -60,3 +60,7 @@ jobs:
         run: node -e "require('./build/Release/baja_xlsx.node'); console.log('addon loads OK')"
       - name: Test
         run: npm test
+      # Keeps the benchmark script working as the API grows (it covers the
+      # write scenarios too); the numbers themselves are not asserted.
+      - name: Benchmark smoke run
+        run: npm run bench -- --iterations 1 --rows 500

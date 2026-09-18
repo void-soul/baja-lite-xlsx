@@ -7,24 +7,37 @@
  *   npm run bench                              # uses examples/sample.xlsx
  *   npm run bench -- big.xlsx                  # your own (large) file
  *   npm run bench -- big.xlsx --iterations 3
+ *   npm run bench -- big.xlsx --rows 200000    # size of the write workload
  *
- * Point it at a real 100k-1M row workbook to see how the read paths differ:
- * buffered, column-projected, image-less and streamed.
+ * Point it at a real 100k-1M row workbook to see how the read paths differ
+ * (buffered, column-projected, image-less, streamed), and use --rows to size
+ * the write scenarios (sync/async sheet writes, cell patching, template
+ * rendering with and without the structure cache).
  */
 
 const path = require('path');
 const fs = require('fs');
 
-const { readTableAsJSON, readTableAsJSONAsync } = require('..');
+const {
+  readTableAsJSON,
+  readTableAsJSONAsync,
+  writeTableAsJSON,
+  writeTableAsJSONAsync,
+  updateCells,
+  renderTemplate,
+  renderTemplateAsync
+} = require('..');
 
 function parseArgs(argv) {
-  const args = { iterations: 5, batchSize: 20000, file: null };
+  const args = { iterations: 5, batchSize: 20000, rows: 50000, file: null };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--iterations') {
       args.iterations = Math.max(1, parseInt(argv[++i], 10) || 1);
     } else if (arg === '--batch') {
       args.batchSize = Math.max(1, parseInt(argv[++i], 10) || 20000);
+    } else if (arg === '--rows') {
+      args.rows = Math.max(1, parseInt(argv[++i], 10) || 50000);
     } else if (!arg.startsWith('--')) {
       args.file = arg;
     }
@@ -37,6 +50,23 @@ function parseArgs(argv) {
 
 function mb(bytes) {
   return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+// Rows for the write scenarios: mixed types, so numbers, dates, booleans and
+// text all go through the writer.
+function makeRows(count) {
+  const rows = new Array(count);
+  const when = new Date(2026, 0, 15);
+  for (let i = 0; i < count; i++) {
+    rows[i] = {
+      id: i + 1,
+      name: `row ${i + 1}`,
+      amount: (i % 1000) * 1.25,
+      when,
+      flag: i % 2 === 0
+    };
+  }
+  return rows;
 }
 
 async function measure(label, run, iterations) {
@@ -114,6 +144,100 @@ async function main() {
     ));
   }
 
+  // -------------------------------------------------------------------------
+  // Write scenarios
+  // -------------------------------------------------------------------------
+
+  const writeRows = makeRows(args.rows);
+  const writeOptions = {
+    sheetName: 'Bench',
+    columns: {
+      id: {},
+      name: {},
+      amount: { numberFormat: '#,##0.00' },
+      when: { numberFormat: 'yyyy-mm-dd' },
+      flag: {}
+    }
+  };
+  const asWritten = (result) => ({ rowCount: writeRows.length, bytes: result.length });
+
+  console.log(`\n  write workload: ${writeRows.length} rows x 5 columns`);
+
+  results.push(await measure(
+    'write sync',
+    () => asWritten(writeTableAsJSON(writeRows, writeOptions)),
+    args.iterations
+  ));
+  results.push(await measure(
+    'write async',
+    async () => asWritten(await writeTableAsJSONAsync(writeRows, writeOptions)),
+    args.iterations
+  ));
+
+  const writeTarget = path.join(__dirname, '.bench-write.xlsx');
+  results.push(await measure(
+    'write sync -> file',
+    () => {
+      const summary = writeTableAsJSON(writeRows, { ...writeOptions, output: writeTarget });
+      return { rowCount: writeRows.length, bytes: summary.bytes };
+    },
+    args.iterations
+  ));
+
+  // Patch a workbook that has the rows above: 200 scattered cells.
+  const patchSource = path.join(__dirname, '.bench-patch.xlsx');
+  writeTableAsJSON(writeRows.slice(0, Math.min(writeRows.length, 1000)), {
+    ...writeOptions,
+    output: patchSource
+  });
+  const updates = [];
+  for (let i = 0; i < 200; i++) {
+    updates.push({ cell: `C${i + 2}`, value: i * 1.5, numberFormat: '#,##0.00' });
+  }
+  results.push(await measure(
+    'updateCells (200 cells)',
+    () => ({ rowCount: updates.length, bytes: updateCells({ template: patchSource, updates }).length }),
+    args.iterations
+  ));
+
+  // Render a template whose loop expands to `rows` output rows.
+  const templateFile = path.join(__dirname, '.bench-template.xlsx');
+  writeTableAsJSON(
+    [
+      ['name', 'amount'],
+      ['{{#each items}}', ''],
+      ['${name}', '${amount}'],
+      ['{{/each}}', '']
+    ],
+    { columns: [{}, {}], includeHeader: false, output: templateFile }
+  );
+  const templateValues = {
+    items: writeRows.map((row) => ({ name: row.name, amount: row.amount }))
+  };
+  const asRendered = (result) => ({ rowCount: templateValues.items.length, bytes: result.length });
+
+  results.push(await measure(
+    'renderTemplate',
+    () => asRendered(renderTemplate(templateValues, { template: templateFile })),
+    args.iterations
+  ));
+  results.push(await measure(
+    'renderTemplate cache: true',
+    () => asRendered(renderTemplate(templateValues, { template: templateFile, cache: true })),
+    args.iterations
+  ));
+  results.push(await measure(
+    'renderTemplateAsync cache: true',
+    async () => asRendered(await renderTemplateAsync(
+      templateValues, { template: templateFile, cache: true }
+    )),
+    args.iterations
+  ));
+
+  for (const file of [writeTarget, patchSource, templateFile]) {
+    try { fs.unlinkSync(file); } catch (err) { /* nothing to clean up */ }
+  }
+
   const width = Math.max(...results.map((r) => r.label.length));
   console.log('  scenario'.padEnd(width + 4) + 'best      median    rows       rows/s');
   console.log('  ' + '-'.repeat(width + 46));
@@ -135,9 +259,11 @@ async function main() {
       '   rss ' + mb(r.rssDelta).padStart(9)
     );
   }
-  console.log('\nNote: the smallest number is the most meaningful one; the streaming row');
-  console.log('stays flat in memory no matter how large the sheet is, which is what the');
-  console.log('heap/rss columns above show for a large file.');
+  console.log('\nNote: the smallest number is the most meaningful one. For reads, the');
+  console.log('streaming row stays flat in memory no matter how large the sheet is -- that is');
+  console.log('what the heap/rss columns show for a large file. For writes, the async rows');
+  console.log('keep the event loop free while doing the same work as their sync twin, and');
+  console.log('"renderTemplate cache: true" skips re-reading and re-scanning the template.');
 }
 
 main().catch((err) => {

@@ -763,7 +763,7 @@ function validateRenderSpec(values, options) {
     throw makeError('INVALID_OPTIONS', 'options must be an object');
   }
 
-  const { template, sheetName, strict = true, output, compression } = options;
+  const { template, sheetName, strict = true, cache = false, output, compression } = options;
 
   if (typeof template !== 'string' && !Buffer.isBuffer(template)) {
     throw makeError('INVALID_OPTIONS', 'options.template is required (file path or Buffer)');
@@ -773,6 +773,9 @@ function validateRenderSpec(values, options) {
   }
   if (typeof strict !== 'boolean') {
     throw makeError('INVALID_OPTIONS', 'options.strict must be a boolean');
+  }
+  if (typeof cache !== 'boolean') {
+    throw makeError('INVALID_OPTIONS', 'options.cache must be a boolean');
   }
   if (output !== undefined && typeof output !== 'string') {
     throw makeError('INVALID_OPTIONS', 'options.output must be a file path');
@@ -785,6 +788,7 @@ function validateRenderSpec(values, options) {
     options: {
       sheetName,
       strict,
+      cache,
       output: output === undefined ? undefined : path.resolve(output),
       compression
     }

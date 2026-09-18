@@ -224,9 +224,24 @@ const buffer = renderTemplate(
 都原样保留。只有文本含标记的单元格会被重写（且保留其样式），不含标记的工作表整表
 按字节搬运。
 
+标记既可以写在单元格里，也可以位于 `sharedStrings`（Excel 存储单元格文本的方式），
+因此在 Excel 里手工制作的模板可以直接使用。
+
 只含标记的行视为分隔行；若 `{{#each}}` 所在行还有数据单元格，则该行就是第一条被
 重复的行。找不到值的标记会抛 `TEMPLATE_ERROR`（传 `strict: false` 则写为空串），
 `{{#each}}` 未闭合一定报错。
+
+#### 复用模板：`cache: true`
+
+```javascript
+// 报表服务反复渲染同一个模板
+const filled = await renderTemplateAsync(values, { template, cache: true });
+```
+
+解析后的模板结构（行布局、标记位置、sharedStrings 表）会留在进程内**有界缓存**中
+（最多 8 个模板 / 64 MB，LRU 淘汰），重复渲染因而完全跳过模板的读取与扫描。缓存键为
+模板身份（路径 + 大小 + mtime，Buffer 则用内容哈希）加表名过滤，因此模板被改写会
+自动失效。默认 `false`。
 
 ### 异步写入
 

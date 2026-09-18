@@ -1151,6 +1151,10 @@ TemplatePlan readTemplatePlan(const Object& options) {
         const Value value = options.Get("strict");
         if (value.IsBoolean()) plan.strict = value.As<Boolean>().Value();
     }
+    if (options.Has("cache")) {
+        const Value value = options.Get("cache");
+        if (value.IsBoolean()) plan.cache = value.As<Boolean>().Value();
+    }
     return plan;
 }
 

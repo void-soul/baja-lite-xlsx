@@ -31,6 +31,12 @@ using TemplateValues = std::unordered_map<std::string, TemplateValue>;
 struct TemplatePlan {
     std::string sheetName; // empty = every worksheet
     bool strict = true;    // unknown placeholder -> error instead of empty text
+    // Keep the parsed template structure (row layout, marker positions, shared
+    // string table) in a bounded in-process cache. A report server that renders
+    // the same template repeatedly then skips reading and scanning it entirely;
+    // the cache is keyed by the template's identity (path + size + mtime, or a
+    // content hash for bytes) and by the sheet filter.
+    bool cache = false;
 };
 
 // Renders ${path} placeholders and {{#each path}} ... {{/each}} blocks in a

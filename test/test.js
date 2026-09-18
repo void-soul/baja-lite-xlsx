@@ -528,6 +528,93 @@ test('renderTemplate writes to a file when asked', null, () => {
   assert.deepEqual(readTableAsJSON(target), [{ a: 'ok' }]);
 });
 
+test('cache: true renders exactly what the uncached path renders', null, () => {
+  const template = makeTemplate(
+    [
+      ['name', 'amount'],
+      ['{{#each items}}', ''],
+      ['${name}', '${amount}'],
+      ['{{/each}}', '']
+    ],
+    [{}, {}]
+  );
+  const values = { items: [{ name: 'a', amount: 1 }, { name: 'b', amount: 2 }] };
+
+  const plain = renderTemplate(values, { template });
+  const firstCached = renderTemplate(values, { template, cache: true });   // fills the cache
+  const secondCached = renderTemplate(values, { template, cache: true });  // served from it
+
+  assert.ok(plain.equals(firstCached), 'cached bytes must match the uncached render');
+  assert.ok(firstCached.equals(secondCached), 'cache hits must stay identical');
+  assert.deepEqual(readTableAsJSON(secondCached), [
+    { name: 'a', amount: '1' },
+    { name: 'b', amount: '2' }
+  ]);
+});
+
+test('the cache drops an entry when the template is rewritten', null, () => {
+  ensureOutputDir();
+  const target = path.join(outputDir, 'cache-invalidate.xlsx');
+
+  writeTableAsJSON([['label'], ['A ${v}']], {
+    columns: [{}], includeHeader: false, output: target
+  });
+  const first = readTableAsJSON(renderTemplate({ v: 'x' }, { template: target, cache: true }));
+  assert.deepEqual(first, [{ label: 'A x' }]);
+
+  // Same path, different layout: the identity (size + mtime) changes, so the
+  // stale entry must not be reused.
+  writeTableAsJSON([['other'], ['B ${v}'], ['C']], {
+    columns: [{}], includeHeader: false, output: target
+  });
+  const second = readTableAsJSON(renderTemplate({ v: 'y' }, { template: target, cache: true }));
+  assert.deepEqual(second, [{ other: 'B y' }, { other: 'C' }]);
+});
+
+// Excel stores cell text in sharedStrings and references it by index, so a
+// template authored in Excel has no marker in its sheet XML at all. This fixture
+// was produced by docs/local/cachecheck.cpp from a package our own writer made
+// (see that file), which keeps it loadable by xlnt as well.
+const SHARED_TEMPLATE = path.join(__dirname, 'fixtures', 'template-shared-strings.xlsx');
+
+test('renderTemplate handles markers stored in sharedStrings', null, () => {
+  const buffer = renderTemplate(
+    {
+      customer: 'ACME & Co',
+      items: [{ name: 'Widget', qty: 3 }, { name: 'Gadget', qty: 5 }]
+    },
+    { template: SHARED_TEMPLATE }
+  );
+
+  assert.deepEqual(readTableAsJSON(buffer, { headerRow: 0 }), [
+    { Item: 'Invoice for ACME & Co', Qty: '' },
+    { Item: 'Widget', Qty: '3' },
+    { Item: 'Gadget', Qty: '5' }
+  ]);
+});
+
+test('cache: true also works for shared-string templates', null, () => {
+  const values = { customer: 'Cached', items: [{ name: 'only', qty: 7 }] };
+  const plain = renderTemplate(values, { template: SHARED_TEMPLATE });
+  const firstCached = renderTemplate(values, { template: SHARED_TEMPLATE, cache: true });
+  const secondCached = renderTemplate(values, { template: SHARED_TEMPLATE, cache: true });
+
+  assert.ok(plain.equals(firstCached), 'cache miss must match the uncached render');
+  assert.ok(firstCached.equals(secondCached), 'cache hit must match too');
+
+  const rows = readTableAsJSON(secondCached, { headerRow: 0 });
+  assert.equal(rows[0].Item, 'Invoice for Cached');
+  assert.deepEqual(rows[1], { Item: 'only', Qty: '7' });
+});
+
+test('bad cache option -> INVALID_OPTIONS', null, () => {
+  const template = makeTemplate([['a'], ['${v}']], [{}]);
+  assert.throws(
+    () => renderTemplate({ v: 1 }, { template, cache: 'yes' }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
 test('bad render specs -> INVALID_OPTIONS', null, () => {
   assert.throws(() => renderTemplate('nope', {}), (err) => err.code === 'INVALID_OPTIONS');
   assert.throws(() => renderTemplate({}, {}), (err) => err.code === 'INVALID_OPTIONS');
