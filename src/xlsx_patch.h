@@ -34,6 +34,15 @@ bool replaceSheetData(const TemplateSource& source, const WritePlan& plan,
                       RowSource& table, zipio::ZipWriter::Compression compression,
                       std::vector<uint8_t>& out, std::string& error);
 
+// Mode 1c: append rows to a worksheet, keeping its existing rows. When the
+// sheet does not exist it is created (workbook entry, relationship, content
+// type), which is how callers build multi-sheet workbooks by chaining appends.
+// `headerMode`: "yes"/"no" are explicit; "auto" writes the header only when the
+// sheet was created or had no rows.
+bool appendRows(const TemplateSource& source, const WritePlan& plan, RowSource& table,
+                const std::string& headerMode, zipio::ZipWriter::Compression compression,
+                std::vector<uint8_t>& out, std::string& error);
+
 // Mode 2: rewrite the listed cells only. The sheet is patched in place, the
 // rest of the package is copied verbatim.
 bool updateCells(const TemplateSource& source, const std::vector<CellUpdate>& updates,

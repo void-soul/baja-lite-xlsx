@@ -1,5 +1,7 @@
 #include <napi.h>
 #include "path_util.h"
+#include "zip_reader.h"
+#include "zip_writer.h"
 #include "write_snapshot.h"
 #include "xlsx_patch.h"
 #include "xlsx_reader.h"
@@ -125,8 +127,29 @@ Value cellToJsIndex(Env env, const CellValue& cell,
 
 // Streaming batches carry real values (no cross-batch string pool, which
 // would keep growing for the whole read) -- see P1-1 for the buffered path.
+// Excel serial (1900 system) -> Unix epoch milliseconds.
+Napi::Date serialToDate(Env env, double serial) {
+    return Napi::Date::New(env, (serial - 25569.0) * 86400000.0);
+}
+
 Value cellToJsValueDirect(Env env, const CellValue& cell,
-                          const std::vector<ImageData>& images) {
+                          const std::vector<ImageData>& images, bool typed) {
+    if (!typed) {
+        if (cell.imageIndices.empty()) {
+            return String::New(env, cell.text);
+        }
+    } else if (cell.imageIndices.empty()) {
+        switch (cell.kind) {
+            case CellKindNumber:
+                return Number::New(env, cell.number);
+            case CellKindBoolean:
+                return Boolean::New(env, cell.text == "true");
+            case CellKindDate:
+                return serialToDate(env, cell.number);
+            default:
+                return String::New(env, cell.text);
+        }
+    }
     if (cell.imageIndices.empty()) {
         return String::New(env, cell.text);
     }
@@ -148,7 +171,7 @@ Value cellToJsValueDirect(Env env, const CellValue& cell,
 }
 
 Array rowsToJsArray(Env env, const std::vector<std::vector<CellValue>>& rows,
-                    const std::vector<ImageData>& images) {
+                    const std::vector<ImageData>& images, bool typed) {
     Array result = Array::New(env, rows.size());
     for (size_t r = 0; r < rows.size(); ++r) {
         if (hasPendingException(env)) return result;
@@ -156,7 +179,7 @@ Array rowsToJsArray(Env env, const std::vector<std::vector<CellValue>>& rows,
         Array rowArray = Array::New(env, row.size());
         for (size_t c = 0; c < row.size(); ++c) {
             rowArray.Set(static_cast<uint32_t>(c),
-                         cellToJsValueDirect(env, row[c], images));
+                         cellToJsValueDirect(env, row[c], images, typed));
         }
         result.Set(static_cast<uint32_t>(r), rowArray);
     }
@@ -174,7 +197,7 @@ Array stringArray(Env env, const std::vector<std::string>& values) {
 // Takes a non-const ExcelData so each row can be moved out while it is
 // converted: the C++ copy is released row by row instead of staying fully
 // resident next to the JS result (P0-5).
-Array sheetsToArray(Env env, ExcelData& data, StringPool& pool) {
+Array sheetsToArray(Env env, ExcelData& data, StringPool& pool, bool typed) {
     Array result = Array::New(env, data.sheets.size());
 
     for (size_t i = 0; i < data.sheets.size(); ++i) {
@@ -192,7 +215,8 @@ Array sheetsToArray(Env env, ExcelData& data, StringPool& pool) {
             Array rowArray = Array::New(env, rowData.size());
             for (size_t col = 0; col < rowData.size(); ++col) {
                 rowArray.Set(static_cast<uint32_t>(col),
-                             cellToJsIndex(env, rowData[col], data.images, pool));
+                             typed ? cellToJsValueDirect(env, rowData[col], data.images, true)
+                                   : cellToJsIndex(env, rowData[col], data.images, pool));
             }
             dataArray.Set(static_cast<uint32_t>(row), rowArray);
         }
@@ -252,14 +276,15 @@ Array warningsToArray(Env env, const std::vector<std::string>& warnings) {
     return result;
 }
 
-Object buildResult(Env env, ExcelData& data) {
+Object buildResult(Env env, ExcelData& data, bool typed) {
     StringPool pool;
     Object result = Object::New(env);
-    result.Set("sheets", sheetsToArray(env, data, pool));
+    result.Set("sheets", sheetsToArray(env, data, pool, typed));
     result.Set("strings", stringArray(env, pool.values()));
     result.Set("images", imagesToArray(env, data.images));
     result.Set("imagePositions", positionsToArray(env, data.imagePositions));
     result.Set("warnings", warningsToArray(env, data.warnings));
+    result.Set("typed", Boolean::New(env, typed));
     return result;
 }
 
@@ -400,6 +425,25 @@ bool parseReadOptions(const CallbackInfo& info, size_t index, ReadOptions& out) 
         }
     }
 
+    if (opts.Has("values")) {
+        Value v = opts.Get("values");
+        if (!v.IsUndefined() && !v.IsNull()) {
+            if (!v.IsString()) {
+                TypeError::New(env, "options.values must be \"string\" or \"typed\"")
+                    .ThrowAsJavaScriptException();
+                return false;
+            }
+            const std::string values = v.As<String>().Utf8Value();
+            if (values == "typed") {
+                out.typedValues = true;
+            } else if (values != "string") {
+                TypeError::New(env, "options.values must be \"string\" or \"typed\"")
+                    .ThrowAsJavaScriptException();
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -435,7 +479,7 @@ Value ReadExcel(const CallbackInfo& info) {
         return env.Null();
     }
 
-    return buildResult(env, data);
+    return buildResult(env, data, options.typedValues);
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +516,7 @@ public:
             return;
         }
         try {
-            deferred_.Resolve(buildResult(env, data_));
+            deferred_.Resolve(buildResult(env, data_, options_.typedValues));
         } catch (...) {
             deferred_.Reject(env.GetAndClearPendingException().Value());
         }
@@ -575,7 +619,7 @@ Value ReadExcelBatched(const CallbackInfo& info) {
 
     RowBatchSink sink = [&](std::vector<std::vector<CellValue>>&& batch) -> bool {
         rowCount += batch.size();
-        callback.Call({ rowsToJsArray(env, batch, data.images) });
+        callback.Call({ rowsToJsArray(env, batch, data.images, options.typedValues) });
         return !hasPendingException(env);
     };
 
@@ -626,7 +670,8 @@ public:
                 [](Napi::Env env, Napi::Function cb, void* ctx) {
                     BatchPayload* item = static_cast<BatchPayload*>(ctx);
                     ReadExcelBatchedWorker* worker = item->worker;
-                    Array rows = rowsToJsArray(env, item->rows, worker->data_.images);
+                    Array rows = rowsToJsArray(env, item->rows, worker->data_.images,
+                                               worker->options_.typedValues);
                     delete item;
                     cb.Call({ rows });
                     worker->markBatchDelivered(env.IsExceptionPending());
@@ -752,8 +797,16 @@ struct TemplateArgument {
 };
 
 bool readTemplateArgument(const Object& options, TemplateArgument& out) {
-    if (!options.Has("template")) return true;
-    const Value value = options.Get("template");
+    // `sourceFile` is the v2 name (the workbook to start from); `template`
+    // remains accepted at the native layer for compatibility.
+    Value value;
+    if (options.Has("sourceFile")) {
+        value = options.Get("sourceFile");
+    } else if (options.Has("template")) {
+        value = options.Get("template");
+    } else {
+        return true;
+    }
     if (value.IsUndefined() || value.IsNull()) return true;
     if (value.IsString()) {
         out.present = true;
@@ -1272,13 +1325,15 @@ Value RenderTemplate(const CallbackInfo& info) {
 class WriteExcelWorker : public Napi::AsyncWorker {
 public:
     WriteExcelWorker(Napi::Env env, WritePlan plan, WriteSnapshot snapshot,
-                     TemplateArgument templateArg, zipio::ZipWriter::Compression compression,
-                     std::string outputPath)
+                     TemplateArgument templateArg, bool append, std::string headerMode,
+                     zipio::ZipWriter::Compression compression, std::string outputPath)
         : Napi::AsyncWorker(env),
           deferred_(Napi::Promise::Deferred::New(env)),
           plan_(std::move(plan)),
           snapshot_(std::move(snapshot)),
           templateArg_(std::move(templateArg)),
+          append_(append),
+          headerMode_(std::move(headerMode)),
           compression_(compression),
           outputPath_(std::move(outputPath)) {}
 
@@ -1287,10 +1342,16 @@ public:
     void Execute() override {
         BAJA_WORKER_GUARD(
             std::string error;
-            const bool ok = templateArg_.present
-                ? replaceSheetData(templateArg_.source(), plan_, snapshot_, compression_, out_,
-                                   error)
-                : writeNewWorkbook(plan_, snapshot_, compression_, out_, error);
+            bool ok = false;
+            if (!templateArg_.present) {
+                ok = writeNewWorkbook(plan_, snapshot_, compression_, out_, error);
+            } else if (append_) {
+                ok = appendRows(templateArg_.source(), plan_, snapshot_, headerMode_,
+                                compression_, out_, error);
+            } else {
+                ok = replaceSheetData(templateArg_.source(), plan_, snapshot_, compression_, out_,
+                                      error);
+            }
             if (!ok) {
                 SetError(error.empty() ? "WRITE_FAILED|Failed to build the workbook" : error);
                 return;
@@ -1323,6 +1384,8 @@ private:
     WritePlan plan_;
     WriteSnapshot snapshot_;
     TemplateArgument templateArg_;
+    bool append_;
+    std::string headerMode_;
     zipio::ZipWriter::Compression compression_;
     std::string outputPath_;
     std::vector<uint8_t> out_;
@@ -1340,6 +1403,15 @@ Value WriteExcelAsync(const CallbackInfo& info) {
         return env.Null();
     }
 
+    bool append = true;
+    if (options.Has("append") && options.Get("append").IsBoolean()) {
+        append = options.Get("append").As<Boolean>().Value();
+    }
+    std::string headerMode = templateArg.present ? "auto" : "yes";
+    if (options.Has("headerMode") && options.Get("headerMode").IsString()) {
+        headerMode = options.Get("headerMode").As<String>().Utf8Value();
+    }
+
     WriteSnapshot snapshot;
     snapshotRows(env, rows, columnSources, snapshot);
     if (hasPendingException(env)) {
@@ -1347,8 +1419,8 @@ Value WriteExcelAsync(const CallbackInfo& info) {
     }
 
     auto* worker = new WriteExcelWorker(env, std::move(plan), std::move(snapshot),
-                                        std::move(templateArg), readCompression(options),
-                                        readOutputPath(options));
+                                        std::move(templateArg), append, headerMode,
+                                        readCompression(options), readOutputPath(options));
     const Napi::Promise promise = worker->Promise();
     worker->Queue();
     return promise;
@@ -1532,15 +1604,21 @@ struct WriteSessionData {
     WriteSnapshot snapshot;
     size_t rowCount = 0;
     bool finished = false;
+    bool append = true;
+    std::string headerMode = "auto";
 };
 
 bool buildSessionPackage(WriteSessionData& data, zipio::ZipWriter::Compression compression,
                          std::vector<uint8_t>& out, std::string& error) {
     data.snapshot.reset();
-    return data.templateArg.present
-        ? replaceSheetData(data.templateArg.source(), data.plan, data.snapshot, compression, out,
-                           error)
-        : writeNewWorkbook(data.plan, data.snapshot, compression, out, error);
+    if (!data.templateArg.present) {
+        return writeNewWorkbook(data.plan, data.snapshot, compression, out, error);
+    }
+    return data.append
+        ? appendRows(data.templateArg.source(), data.plan, data.snapshot, data.headerMode,
+                     compression, out, error)
+        : replaceSheetData(data.templateArg.source(), data.plan, data.snapshot, compression, out,
+                           error);
 }
 
 class WriteSessionWorker : public Napi::AsyncWorker {
@@ -1616,6 +1694,13 @@ public:
         if (!readWriteSpec(env, options, data_->plan, data_->columns, data_->templateArg)) {
             data_.reset();
             return;
+        }
+        if (options.Has("append") && options.Get("append").IsBoolean()) {
+            data_->append = options.Get("append").As<Boolean>().Value();
+        }
+        data_->headerMode = data_->templateArg.present ? "auto" : "yes";
+        if (options.Has("headerMode") && options.Get("headerMode").IsString()) {
+            data_->headerMode = options.Get("headerMode").As<String>().Utf8Value();
         }
         compression_ = readCompression(options);
         outputPath_ = readOutputPath(options);
@@ -1699,6 +1784,109 @@ void WriteSession::Register(Napi::Env env, Object exports) {
 }
 
 // ---------------------------------------------------------------------------
+// Package IO for the JS-side template engine (lib/ejs-engine.js). The engine
+// evaluates `<%...%>` markers with real JS, which the native layer cannot do;
+// these two primitives give it the raw parts and take the finished package
+// back, so the engine never needs a zip library of its own.
+// ---------------------------------------------------------------------------
+
+Value ReadPackage(const CallbackInfo& info) {
+    Env env = info.Env();
+    if (info.Length() < 1) {
+        return failWith(env, "INVALID_INPUT|A file path or Buffer is required");
+    }
+
+    std::vector<uint8_t> bytes;
+    zip_t* archive = nullptr;
+    std::string error;
+    if (info[0].IsBuffer()) {
+        Buffer<uint8_t> buffer = info[0].As<Buffer<uint8_t>>();
+        bytes.assign(buffer.Data(), buffer.Data() + buffer.Length());
+        archive = zipio::openReadOnlyMemory(bytes, error);
+    } else if (info[0].IsString()) {
+        archive = zipio::openReadOnly(info[0].As<String>().Utf8Value(), error);
+    } else {
+        return failWith(env, "INVALID_INPUT|Input must be a file path or Buffer");
+    }
+    if (!archive) {
+        return failWith(env, error.empty() ? "FILE_OPEN_FAILED|Cannot open the workbook" : error);
+    }
+
+    Object result = Object::New(env);
+    Napi::Array parts = Napi::Array::New(env);
+    uint32_t index = 0;
+    const int count = zip_get_num_entries(archive, 0);
+    for (int i = 0; i < count; ++i) {
+        const char* name = zip_get_name(archive, i, 0);
+        if (!name) continue;
+
+        std::vector<uint8_t> data;
+        std::string readError;
+        if (!zipio::readFile(archive, name, data, zipio::kMaxEntryBytes, readError)) {
+            if (!readError.empty()) {
+                zip_close(archive);
+                return failWith(env, readError);
+            }
+            continue; // entry vanished between listing and reading: skip it
+        }
+
+        Object part = Object::New(env);
+        part.Set("name", String::New(env, name));
+        part.Set("data", Buffer<uint8_t>::Copy(env, data.data(), data.size()));
+        parts[index++] = part;
+    }
+    zip_close(archive);
+
+    result.Set("parts", parts);
+    return result;
+}
+
+Value BuildPackage(const CallbackInfo& info) {
+    Env env = info.Env();
+    if (info.Length() < 1 || !info[0].IsObject()) {
+        return failWith(env, "INVALID_OPTIONS|An options object is required");
+    }
+    Object spec = info[0].As<Object>();
+    if (!spec.Has("parts") || !spec.Get("parts").IsArray()) {
+        return failWith(env, "INVALID_OPTIONS|options.parts must be an array of { name, data }");
+    }
+
+    Napi::Array parts = spec.Get("parts").As<Napi::Array>();
+    const zipio::ZipWriter::Compression compression = readCompression(spec);
+    const uint32_t count = parts.Length();
+
+    std::vector<uint8_t> out;
+    zipio::ZipWriter writer(out);
+    std::string error;
+    for (uint32_t i = 0; i < count; ++i) {
+        Value item = parts.Get(i);
+        if (!item.IsObject()) {
+            return failWith(env, "INVALID_OPTIONS|options.parts[" + std::to_string(i) +
+                                     "] must be an object");
+        }
+        Object part = item.As<Object>();
+        if (!part.Has("name") || !part.Get("name").IsString()) {
+            return failWith(env, "INVALID_OPTIONS|options.parts[" + std::to_string(i) +
+                                     "].name must be a string");
+        }
+        if (!part.Has("data") || !part.Get("data").IsBuffer()) {
+            return failWith(env, "INVALID_OPTIONS|options.parts[" + std::to_string(i) +
+                                     "].data must be a Buffer");
+        }
+        const std::string name = part.Get("name").As<String>().Utf8Value();
+        Buffer<uint8_t> data = part.Get("data").As<Buffer<uint8_t>>();
+        const std::string body(reinterpret_cast<const char*>(data.Data()), data.Length());
+        if (!writer.addEntry(name, body, compression, error)) {
+            return failWith(env, error);
+        }
+    }
+    if (!writer.finish(error)) {
+        return failWith(env, error);
+    }
+    return Buffer<uint8_t>::Copy(env, out.data(), out.size());
+}
+
+// ---------------------------------------------------------------------------
 // Init. The former native `extractImages` export is removed: it was a
 // placeholder that always returned [] silently (AUDIT-20260917-012).
 // ---------------------------------------------------------------------------
@@ -1714,6 +1902,8 @@ Object Init(Env env, Object exports) {
     exports.Set("writeExcelAsync", Function::New(env, WriteExcelAsync));
     exports.Set("writeCellsAsync", Function::New(env, WriteCellsAsync));
     exports.Set("renderTemplateAsync", Function::New(env, RenderTemplateAsync));
+    exports.Set("readPackage", Function::New(env, ReadPackage));
+    exports.Set("buildPackage", Function::New(env, BuildPackage));
     // Internal: index.js drives this when a sheet write is given an iterable
     // instead of an array.
     WriteSession::Register(env, exports);

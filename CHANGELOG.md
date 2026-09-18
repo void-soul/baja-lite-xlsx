@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.0.0 (2026-09-18) — the async-only API
+
+**Breaking: the synchronous methods are gone.** `readTableAsJSONAsync`,
+`writeTableAsJSONAsync`, `updateCellsAsync` and `renderTemplateAsync` were merged
+into their four public names, which now all return Promises:
+
+- `readTableAsJSON(input, options?)`
+- `writeTableAsJSON(rows, options?)`
+- `updateCells(spec)`
+- `renderTemplate(values, options)`
+
+Invalid arguments still throw synchronously; I/O failures reject with the same
+`code` values as before.
+
+- **`sourceFile` replaces `template`** on `writeTableAsJSON` and `updateCells`,
+  and accepts a `Buffer` from any write / update / render call, so results chain
+  directly: write → append → patch → render, all on the returned Buffer.
+- **`writeTableAsJSON` appends** (`sourceFile` + `append: true`, default): rows
+  are added after the target sheet's last row. A missing sheet is created
+  (workbook entry, relationship, content type), which is how multi-sheet
+  workbooks are built by chaining. `includeHeader` defaults to "auto" when
+  appending: the header is written only on a new or empty sheet, so chained
+  appends never duplicate it. `append: false` keeps the replace semantics.
+- **`renderTemplate` speaks ejsExcel**: templates whose cells contain
+  `<%...%>` markers are evaluated as JavaScript — `<%= %>` / `<%~ %>` /
+  `<%# %>` (dynamic formulas with cached values), `forRow`, `forRBegin`/`forREnd`,
+  `forCell`, `ifCBegin`/`ifCEnd`, `_row`/`_col`/`_rc`, `_charPlus_`,
+  `_charToNum_`, `_mergeCellFn_`, `_outlineLevel_`, `_dataValidation_`,
+  `_img_` (http(s) URL / Buffer / base64 / data: URI / file path) and `_qrcode_`
+  (optional `qrcode` package). Every sheet with markers is rendered; `_data_[i]`
+  selects sheet i's data. The native `${path}` / `{{#each}}` markers keep
+  working and render on the worker thread.
+- **`values: 'typed'`** (requires `engine: 'xml'`): numbers, booleans and dates
+  come back as real JS values instead of formatted strings.
+- **Full reads skip the measure pass**: with neither column projection nor a
+  column cap, the direct reader scans the sheet once instead of twice (the
+  common unprojected read case), and rows no longer over-allocate to the
+  measured width.
+- New package IO primitives (`readPackage` / `buildPackage`) back the JS-side
+  template engine, and `assemblePackage` can now add entries, not only replace
+  them.
+
 ## 1.7.1 (2026-09-18) — direct read, one copy per cell
 
 - The direct reader no longer copies every cell text on its way out (the per-row

@@ -371,9 +371,11 @@ void measureSheet(const std::string& xml, SheetExtent& extent) {
 enum class CellStatus { Ok, Unsupported };
 
 CellStatus cellText(const std::string& xml, const Span& cell, const std::vector<std::string>& shared,
-                    const StyleTable& styles, std::string& out) {
+                    const StyleTable& styles, std::string& out, uint8_t& kind, double& numberOut) {
     const std::string type = attribute(xml, cell.start, "t");
     const std::string styleRef = attribute(xml, cell.start, "s");
+    kind = CellKindString;
+    numberOut = 0;
 
     if (type == "s") {
         const std::string raw = trimmed(elementValue(xml, cell));
@@ -416,6 +418,7 @@ CellStatus cellText(const std::string& xml, const Span& cell, const std::vector<
 
     if (type == "b") {
         out = trimmed(elementValue(xml, cell)) == "1" ? "true" : "false";
+        kind = CellKindBoolean;
         return CellStatus::Ok;
     }
 
@@ -440,6 +443,7 @@ CellStatus cellText(const std::string& xml, const Span& cell, const std::vector<
     if (end == raw.c_str()) {
         return CellStatus::Unsupported;
     }
+    numberOut = number;
 
     const size_t style = styleRef.empty()
         ? 0
@@ -447,13 +451,16 @@ CellStatus cellText(const std::string& xml, const Span& cell, const std::vector<
 
     if (styles.isDate(style)) {
         out = formatDateSerial(number);
+        kind = CellKindDate;
         return CellStatus::Ok;
     }
     if (styles.isTime(style)) {
         out = formatTimeOfDay(number);
+        kind = CellKindNumber;
         return CellStatus::Ok;
     }
     out = formatDouble(number);
+    kind = CellKindNumber;
     return CellStatus::Ok;
 }
 
@@ -540,8 +547,11 @@ bool emitRow(std::vector<CellValue>&& row, bool streaming, const RowBatchSink* s
 // unused), the shape both output paths work with.
 bool readRowCells(const std::string& sheetXml, const Span& row, size_t colCap,
                   const std::vector<std::string>& shared, const StyleTable& styles,
-                  std::vector<std::string>& out) {
+                  std::vector<std::string>& out, std::vector<uint8_t>& kinds,
+                  std::vector<double>& numbers) {
     out.assign(colCap + 1, std::string());
+    kinds.assign(colCap + 1, CellKindString);
+    numbers.assign(colCap + 1, 0);
     if (row.selfClosing) return true;
 
     size_t cellPos = row.openEnd + 1;
@@ -558,8 +568,57 @@ bool readRowCells(const std::string& sheetXml, const Span& row, size_t colCap,
         if (column > colCap) continue;
 
         std::string text;
-        if (cellText(sheetXml, cell, shared, styles, text) != CellStatus::Ok) return false;
+        uint8_t kind = CellKindString;
+        double number = 0;
+        if (cellText(sheetXml, cell, shared, styles, text, kind, number) != CellStatus::Ok) {
+            return false;
+        }
         out[column] = std::move(text);
+        kinds[column] = kind;
+        numbers[column] = number;
+    }
+    return true;
+}
+
+// The single-pass variant: no column cap is known up front, so the row grows
+// to the widest cell actually present. Trailing empties are trimmed by the
+// caller's grid semantics at the JS boundary (missing cells read as '').
+bool readRowCellsDynamic(const std::string& sheetXml, const Span& row,
+                         const std::vector<std::string>& shared, const StyleTable& styles,
+                         std::vector<std::string>& out, std::vector<uint8_t>& kinds,
+                         std::vector<double>& numbers) {
+    out.clear();
+    kinds.clear();
+    numbers.clear();
+    if (row.selfClosing) return true;
+
+    size_t cellPos = row.openEnd + 1;
+    while (true) {
+        Span cell;
+        if (!findElement(sheetXml, "c", cellPos, cell)) break;
+        if (cell.start >= row.end) break;
+        cellPos = cell.end;
+
+        size_t column = 0;
+        size_t cellRow = 0;
+        const std::string reference = attribute(sheetXml, cell.start, "r");
+        if (reference.empty() || !parseReference(reference, column, cellRow)) return false;
+
+        if (out.size() < column) {
+            out.resize(column);
+            kinds.resize(column, CellKindString);
+            numbers.resize(column, 0);
+        }
+
+        std::string text;
+        uint8_t kind = CellKindString;
+        double number = 0;
+        if (cellText(sheetXml, cell, shared, styles, text, kind, number) != CellStatus::Ok) {
+            return false;
+        }
+        out[column - 1] = std::move(text);
+        kinds[column - 1] = kind;
+        numbers[column - 1] = number;
     }
     return true;
 }
@@ -587,7 +646,9 @@ bool readRowTexts(const std::string& sheetXml, size_t wanted, size_t colCap,
         implied = declared;
         if (declared != wanted) continue;
 
-        return readRowCells(sheetXml, row, colCap, shared, styles, out);
+        std::vector<uint8_t> kinds;
+        std::vector<double> numbers;
+        return readRowCells(sheetXml, row, colCap, shared, styles, out, kinds, numbers);
     }
     return true;
 }
@@ -595,7 +656,8 @@ bool readRowTexts(const std::string& sheetXml, size_t wanted, size_t colCap,
 // One output row from the parsed texts: only the projected columns when a
 // projection is active, otherwise every column up to the cap. The texts are
 // moved out, so a cell is never copied on its way to the output.
-std::vector<CellValue> makeRow(std::vector<std::string>& cells, bool projecting,
+std::vector<CellValue> makeRow(std::vector<std::string>& cells, const std::vector<uint8_t>& kinds,
+                               const std::vector<double>& numbers, bool projecting,
                                const std::vector<size_t>& projected, size_t colCap) {
     std::vector<CellValue> row;
     if (projecting) {
@@ -603,6 +665,8 @@ std::vector<CellValue> makeRow(std::vector<std::string>& cells, bool projecting,
         for (size_t column : projected) {
             CellValue value;
             value.text = std::move(cells[column]);
+            value.kind = column < kinds.size() ? kinds[column] : CellKindString;
+            value.number = column < numbers.size() ? numbers[column] : 0;
             row.push_back(std::move(value));
         }
         return row;
@@ -611,6 +675,8 @@ std::vector<CellValue> makeRow(std::vector<std::string>& cells, bool projecting,
     row.resize(colCap);
     for (size_t column = 1; column <= colCap; ++column) {
         row[column - 1].text = std::move(cells[column]);
+        row[column - 1].kind = column < kinds.size() ? kinds[column] : CellKindString;
+        row[column - 1].number = column < numbers.size() ? numbers[column] : 0;
     }
     return row;
 }
@@ -699,14 +765,136 @@ DirectReadStatus readSheetFromXml(const TemplateSource& source, const ReadOption
         }
     }
 
+    // Projection has to be resolved before the first row is emitted, so the
+    // header row is read on its own here instead of during the main pass.
+    const bool needProjection = !options.columns.empty();
+    // With neither projection nor a column cap the extent is only needed for
+    // the has-cell-A1 check and (with maxRows) a truncation warning, both of
+    // which the scan itself can produce. That removes the whole-sheet measure
+    // pre-pass from the common full read.
+    const bool measureFirst = needProjection || options.maxCols > 0;
+
     SheetExtent extent;
-    measureSheet(sheetXml, extent);
-    if (!extent.hasCellA1) {
-        // Matches the xlnt path, which treats a sheet without A1 as empty.
-        sheet.data.clear();
+    if (measureFirst) {
+        measureSheet(sheetXml, extent);
+        if (!extent.hasCellA1) {
+            // Matches the xlnt path, which treats a sheet without A1 as empty.
+            sheet.data.clear();
+            return DirectReadStatus::Ok;
+        }
+    }
+
+    const bool streaming = sink != nullptr;
+    const size_t effectiveBatch = batchSize > 0 ? batchSize : 1000;
+    std::vector<std::vector<CellValue>> batch;
+    if (streaming) {
+        batch.reserve(effectiveBatch);
+    }
+    bool stopped = false;
+
+    if (!measureFirst) {
+        // -------------------------------------------------------------------
+        // Single pass: no projection, no column cap. The extent is not needed
+        // up front; rows grow to their own width and maxRows truncates while
+        // the scan continues (cheaply, refs only) to report the true size.
+        // -------------------------------------------------------------------
+        {
+            // The has-cell-A1 check, done as an early-exit scan: A1 lives in
+            // the first row of every normal sheet, so this usually costs one
+            // row. A sheet without A1 is empty, exactly like the xlnt path.
+            bool sawCellA1 = false;
+            size_t scanPos = 0;
+            while (!sawCellA1) {
+                Span row;
+                if (!findElement(sheetXml, "row", scanPos, row)) break;
+                scanPos = row.end;
+                if (row.selfClosing) continue;
+                size_t cellPos = row.openEnd + 1;
+                while (!sawCellA1) {
+                    Span cell;
+                    if (!findElement(sheetXml, "c", cellPos, cell)) break;
+                    if (cell.start >= row.end) break;
+                    cellPos = cell.end;
+                    sawCellA1 = attribute(sheetXml, cell.start, "r") == "A1";
+                }
+            }
+            if (!sawCellA1) {
+                return DirectReadStatus::Ok; // empty sheet, like the xlnt path
+            }
+        }
+
+        const size_t rowCap = options.maxRows; // 0 = unlimited
+        size_t rowIndex = 0;
+        size_t pos = 0;
+        size_t maxDeclared = 0;
+        const auto emitEmpty = [&]() {
+            return emitRow(std::vector<CellValue>(), streaming, sink, effectiveBatch, batch, sheet);
+        };
+
+        while (!stopped) {
+            Span row;
+            if (!findElement(sheetXml, "row", pos, row)) break;
+            pos = row.end;
+
+            const std::string rowRef = attribute(sheetXml, row.start, "r");
+            const size_t declared = rowRef.empty()
+                ? rowIndex + 1
+                : static_cast<size_t>(std::strtoul(rowRef.c_str(), nullptr, 10));
+            if (declared == 0) {
+                return DirectReadStatus::Unsupported;
+            }
+            maxDeclared = std::max(maxDeclared, declared);
+
+            if (rowCap > 0 && declared > rowCap) {
+                continue; // beyond the cap: extent bookkeeping only
+            }
+            if (declared <= rowIndex) {
+                // Out-of-order rows: xlnt sorts them, this reader hands the
+                // file back.
+                return DirectReadStatus::Unsupported;
+            }
+
+            // Rows may be sparse: everything between the previous one and this
+            // one is an empty row.
+            while (rowIndex + 1 < declared && !stopped) {
+                ++rowIndex;
+                stopped = !emitEmpty();
+            }
+            ++rowIndex;
+            if (stopped) break;
+
+            std::vector<std::string> cells;
+            std::vector<uint8_t> kinds;
+            std::vector<double> numbers;
+            if (!readRowCellsDynamic(sheetXml, row, shared, styles, cells, kinds, numbers)) {
+                return DirectReadStatus::Unsupported;
+            }
+            std::vector<CellValue> outRow(cells.size());
+            for (size_t c = 0; c < cells.size(); ++c) {
+                outRow[c].text = std::move(cells[c]);
+                outRow[c].kind = kinds[c];
+                outRow[c].number = numbers[c];
+            }
+            // `outRow` cells are moved out here, which is what keeps the full
+            // read from copying every cell text twice.
+            stopped = !emitRow(std::move(outRow), streaming, sink, effectiveBatch, batch, sheet);
+        }
+
+        if (streaming && !stopped && !batch.empty()) {
+            (*sink)(std::move(batch));
+        }
+        if (rowCap > 0 && maxDeclared > rowCap) {
+            std::ostringstream oss;
+            oss << "Sheet '" << sheet.name << "' truncated to " << rowCap << " of " << maxDeclared
+                << " rows (maxRows)";
+            warnings.push_back(oss.str());
+        }
         return DirectReadStatus::Ok;
     }
 
+    // -----------------------------------------------------------------------
+    // Measured path: projection and/or a column cap need the extent up front.
+    // -----------------------------------------------------------------------
     const size_t rowCap = (options.maxRows > 0 && options.maxRows < extent.maxRow)
                               ? options.maxRows
                               : extent.maxRow;
@@ -726,9 +914,6 @@ DirectReadStatus readSheetFromXml(const TemplateSource& source, const ReadOption
         warnings.push_back(oss.str());
     }
 
-    // Projection has to be resolved before the first row is emitted, so the
-    // header row is read on its own here instead of during the main pass.
-    const bool needProjection = !options.columns.empty();
     std::vector<size_t> projected;
     if (needProjection) {
         std::vector<std::string> header;
@@ -743,14 +928,6 @@ DirectReadStatus readSheetFromXml(const TemplateSource& source, const ReadOption
         }
         sheet.projectedColumns = projected;
     }
-
-    const bool streaming = sink != nullptr;
-    const size_t effectiveBatch = batchSize > 0 ? batchSize : 1000;
-    std::vector<std::vector<CellValue>> batch;
-    if (streaming) {
-        batch.reserve(effectiveBatch);
-    }
-    bool stopped = false;
 
     size_t rowIndex = 0;
     size_t pos = 0;
@@ -787,13 +964,15 @@ DirectReadStatus readSheetFromXml(const TemplateSource& source, const ReadOption
         ++rowIndex;
 
         std::vector<std::string> cells;
-        if (!readRowCells(sheetXml, row, colCap, shared, styles, cells)) {
+        std::vector<uint8_t> kinds;
+        std::vector<double> numbers;
+        if (!readRowCells(sheetXml, row, colCap, shared, styles, cells, kinds, numbers)) {
             return DirectReadStatus::Unsupported;
         }
         // `cells` is consumed here, which is what keeps the full read from
         // copying every cell text twice.
-        stopped = !emitRow(makeRow(cells, needProjection, projected, colCap), streaming, sink,
-                           effectiveBatch, batch, sheet);
+        stopped = !emitRow(makeRow(cells, kinds, numbers, needProjection, projected, colCap),
+                           streaming, sink, effectiveBatch, batch, sheet);
     }
 
     // Fill in the rest of the window when the XML ended early.

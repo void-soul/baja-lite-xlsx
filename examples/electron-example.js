@@ -1,14 +1,14 @@
 /**
  * Electron usage example.
  *
- * Use readTableAsJSONAsync in the renderer/main process so parsing runs on
+ * Use readTableAsJSON in the renderer/main process so parsing runs on
  * the libuv thread pool and the UI never blocks (AUDIT-20260917-007).
  */
-const { readTableAsJSONAsync } = require('baja-lite-xlsx');
+const { readTableAsJSON } = require('baja-lite-xlsx');
 const path = require('path');
 
 async function loadExcelFile(filePath) {
-  const rows = await readTableAsJSONAsync(filePath, {
+  const rows = await readTableAsJSON(filePath, {
     headerRow: 0,
     includeWarnings: true
   });

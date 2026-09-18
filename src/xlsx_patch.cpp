@@ -576,6 +576,7 @@ bool assemblePackage(zip_t* archive, const std::vector<Replacement>& replacement
                      std::string& error) {
     zipio::ZipWriter writer(out);
     const zip_int64_t count = zip_get_num_entries(archive, 0);
+    std::vector<bool> matched(replacements.size(), false);
 
     for (zip_int64_t i = 0; i < count; ++i) {
         const char* rawName = zip_get_name(archive, i, 0);
@@ -584,9 +585,10 @@ bool assemblePackage(zip_t* archive, const std::vector<Replacement>& replacement
         if (name.empty() || name.back() == '/') continue; // directory entries
 
         const Replacement* replacement = nullptr;
-        for (const Replacement& candidate : replacements) {
-            if (candidate.name == name) {
-                replacement = &candidate;
+        for (size_t r = 0; r < replacements.size(); ++r) {
+            if (replacements[r].name == name) {
+                replacement = &replacements[r];
+                matched[r] = true;
                 break;
             }
         }
@@ -613,6 +615,17 @@ bool assemblePackage(zip_t* archive, const std::vector<Replacement>& replacement
         if (!writer.addEntry(name, std::string(data.begin(), data.end()), compression, error)) {
             return false;
         }
+    }
+
+    // Replacements for parts the archive does not have yet are NEW entries:
+    // this is how a created worksheet joins the package.
+    for (size_t r = 0; r < replacements.size(); ++r) {
+        if (matched[r]) continue;
+        const Replacement& rep = replacements[r];
+        const bool ok = rep.content
+            ? writer.addEntry(rep.name, *rep.content, compression, error)
+            : writer.addStreamedEntry(rep.name, *rep.stream, compression, error);
+        if (!ok) return false;
     }
 
     return writer.finish(error);
@@ -659,6 +672,7 @@ bool replaceSheetData(const TemplateSource& source, const WritePlan& plan, RowSo
     if (!readEntry(archive, part, sheetXml, error)) return false;
 
     const size_t sheetDataStart = xmlp::findTagOpen(sheetXml, "sheetData", 0);
+    { std::printf("[dbg] A2\n"); std::fflush(stdout); }
     if (sheetDataStart == std::string::npos) {
         error = "WRITE_FAILED|Sheet '" + plan.sheetName + "' has no sheetData element";
         return false;
@@ -715,6 +729,330 @@ bool replaceSheetData(const TemplateSource& source, const WritePlan& plan, RowSo
     std::vector<Replacement> replacements;
     replacements.push_back({part, nullptr, &stream});
     replacements.push_back({"xl/styles.xml", &stylesXml, nullptr});
+    return assemblePackage(archive, replacements, compression, out, error);
+}
+
+// ---------------------------------------------------------------------------
+// Mode 1c: appending rows (and creating sheets)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Locates a worksheet part by name without treating absence as an error, so
+// the append mode can create the sheet instead. An empty `sheetName` selects
+// the first sheet.
+bool tryFindSheetPart(zip_t* archive, const std::string& sheetName, std::string& part) {
+    std::string ignored;
+    std::string workbook;
+    if (!readEntry(archive, "xl/workbook.xml", workbook, ignored)) return false;
+    std::string rels;
+    if (!readEntry(archive, "xl/_rels/workbook.xml.rels", rels, ignored)) return false;
+
+    const std::map<std::string, std::string> relationships = parseRelationshipTargets(rels);
+
+    size_t pos = 0;
+    while (true) {
+        const size_t elementStart = xmlp::findTagOpen(workbook, "sheet", pos);
+        if (elementStart == std::string::npos) return false;
+        pos = elementStart + 5;
+
+        std::string name;
+        std::string relationshipId;
+        xmlp::getAttribute(workbook, elementStart, "name", name);
+        xmlp::getAttribute(workbook, elementStart, "r:id", relationshipId);
+        if (!sheetName.empty() && name != sheetName) continue;
+
+        const auto it = relationships.find(relationshipId);
+        if (it == relationships.end()) return false;
+        return resolvePartName(archive, it->second, part);
+    }
+}
+
+// Largest row number among the <row r="N"> elements in [from, to).
+size_t lastRowNumber(const std::string& sheetXml, size_t from, size_t to) {
+    size_t last = 0;
+    size_t pos = from;
+    while (true) {
+        const size_t at = xmlp::findTagOpen(sheetXml, "row", pos);
+        if (at == std::string::npos || at >= to) break;
+        pos = at + 3;
+        std::string text;
+        if (xmlp::getAttribute(sheetXml, at, "r", text) && isAllDigits(text)) {
+            last = std::max(last, static_cast<size_t>(std::stoul(text)));
+        }
+    }
+    return last;
+}
+
+// A part name like xl/worksheets/sheet3.xml that no entry uses yet.
+std::string freeWorksheetPartName(zip_t* archive) {
+    static const std::string prefix = "xl/worksheets/sheet";
+    std::set<size_t> used;
+    const int count = zip_get_num_entries(archive, 0);
+    for (int i = 0; i < count; ++i) {
+        const char* name = zip_get_name(archive, i, 0);
+        if (!name) continue;
+        const std::string normalized = normalizeName(name);
+        if (normalized.compare(0, prefix.size(), prefix) != 0) continue;
+        const size_t digitsEnd = normalized.find(".xml", prefix.size());
+        if (digitsEnd == std::string::npos) continue;
+        const std::string digits = normalized.substr(prefix.size(), digitsEnd - prefix.size());
+        if (!digits.empty() && isAllDigits(digits)) {
+            used.insert(static_cast<size_t>(std::stoul(digits)));
+        }
+    }
+    size_t n = 1;
+    while (used.count(n) != 0) ++n;
+    return "xl/worksheets/sheet" + std::to_string(n) + ".xml";
+}
+
+// The three edits a new sheet needs, filled by registerWorksheet and handed to
+// the assembly step by the caller. Kept as plain data: no shared mutable state
+// between concurrent workers.
+struct WorkbookEdits {
+    std::string workbook;
+    std::string rels;
+    std::string types;
+};
+
+// Adds the new sheet to workbook.xml, its relationships and [Content_Types].
+bool registerWorksheet(zip_t* archive, const std::string& sheetName, const std::string& part,
+                       WorkbookEdits& edits, std::string& error) {
+    std::string workbook;
+    if (!readEntry(archive, "xl/workbook.xml", workbook, error)) return false;
+    std::string rels;
+    if (!readEntry(archive, "xl/_rels/workbook.xml.rels", rels, error)) return false;
+    std::string types;
+    if (!readEntry(archive, "[Content_Types].xml", types, error)) return false;
+
+    const std::map<std::string, std::string> relationships = parseRelationshipTargets(rels);
+
+    size_t maxSheetId = 0;
+    {
+        size_t pos = 0;
+        while (true) {
+            const size_t at = xmlp::findTagOpen(workbook, "sheet", pos);
+            if (at == std::string::npos) break;
+            pos = at + 5;
+            std::string text;
+            if (xmlp::getAttribute(workbook, at, "sheetId", text) && isAllDigits(text)) {
+                maxSheetId = std::max(maxSheetId, static_cast<size_t>(std::stoul(text)));
+            }
+        }
+    }
+
+    std::string relationshipId;
+    for (size_t n = 1; relationshipId.empty(); ++n) {
+        const std::string candidate = "rId" + std::to_string(n);
+        if (relationships.find(candidate) == relationships.end()) {
+            relationshipId = candidate;
+        }
+        if (n > relationships.size() + 1) {
+            error = "WRITE_FAILED|Could not find a free relationship id";
+            return false;
+        }
+    }
+
+    const size_t sheetsClose = workbook.find("</sheets>");
+    if (sheetsClose == std::string::npos) {
+        error = "WRITE_FAILED|The template workbook.xml has no </sheets>";
+        return false;
+    }
+    workbook.insert(sheetsClose,
+                    "<sheet name=\"" + escapeXmlAttribute(sheetName) + "\" sheetId=\"" +
+                        std::to_string(maxSheetId + 1) + "\" r:id=\"" + relationshipId + "\"/>");
+
+    const size_t relsClose = rels.find("</Relationships>");
+    if (relsClose == std::string::npos) {
+        error = "WRITE_FAILED|The workbook relationships part is malformed";
+        return false;
+    }
+    rels.insert(relsClose,
+                "<Relationship Id=\"" + relationshipId +
+                    "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                    "relationships/worksheet\" Target=\"" + part.substr(3) + "\"/>");
+
+    const size_t typesClose = types.find("</Types>");
+    if (typesClose == std::string::npos) {
+        error = "WRITE_FAILED|[Content_Types].xml is malformed";
+        return false;
+    }
+    types.insert(typesClose,
+                 "<Override PartName=\"/" + part +
+                     "\" ContentType=\"application/vnd.openxmlformats-officedocument."
+                     "spreadsheetml.worksheet+xml\"/>");
+
+    edits.workbook = std::move(workbook);
+    edits.rels = std::move(rels);
+    edits.types = std::move(types);
+    return true;
+}
+
+// Builds a complete worksheet part for a freshly created sheet: optional
+// freeze pane, column widths and the streamed rows.
+std::string buildNewSheetXml(const WritePlan& plan, SheetStyles& styles, RowSource& table) {
+    const size_t columnCount = plan.columns.size();
+    std::string xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">";
+
+    if (plan.freezeHeader) {
+        xml += "<sheetViews><sheetView tabSelected=\"1\" workbookViewId=\"0\">"
+               "<pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" "
+               "state=\"frozen\"/></sheetView></sheetViews>";
+    }
+    xml += "<sheetFormatPr defaultRowHeight=\"15\"/>";
+
+    const bool hasWidths =
+        std::any_of(plan.columns.begin(), plan.columns.end(),
+                    [](const WriteColumn& c) { return c.width > 0; });
+    if (hasWidths) {
+        xml += "<cols>";
+        for (size_t i = 0; i < columnCount; ++i) {
+            if (plan.columns[i].width <= 0) continue;
+            xml += "<col min=\"" + std::to_string(i + 1) + "\" max=\"" + std::to_string(i + 1) +
+                   "\" width=\"" + formatNumber(plan.columns[i].width) +
+                   "\" customWidth=\"1\"/>";
+        }
+        xml += "</cols>";
+    }
+
+    xml += "<sheetData>";
+    SheetRowStream rows(plan, table, styles, 1);
+    std::string chunk;
+    while (rows.next(chunk)) {
+        xml += chunk;
+    }
+    xml += "</sheetData></worksheet>";
+    return xml;
+}
+
+} // namespace
+
+bool appendRows(const TemplateSource& source, const WritePlan& plan, RowSource& table,
+                const std::string& headerMode, zipio::ZipWriter::Compression compression,
+                std::vector<uint8_t>& out, std::string& error) {
+    if (plan.columns.empty()) {
+        error = "INVALID_OPTIONS|At least one column is required";
+        return false;
+    }
+    if (!isValidSheetName(plan.sheetName, error) && !plan.sheetName.empty()) {
+        error = "INVALID_OPTIONS|" + error;
+        return false;
+    }
+
+    zip_t* archive = nullptr;
+    if (!openTemplate(source, archive, error)) return false;
+    ArchiveCloser closer(archive);
+
+    std::string part;
+    const bool exists = tryFindSheetPart(archive, plan.sheetName, part);
+    bool header = headerMode == "yes";
+    size_t startRow = 1;
+
+    std::string createdXml;
+    std::string prefix;
+    std::string suffix;
+
+    if (!exists) {
+        if (plan.sheetName.empty()) {
+            error = "SHEET_NOT_FOUND|The workbook has no sheets; pass a sheetName to create one";
+            return false;
+        }
+        header = headerMode != "no";
+        part = freeWorksheetPartName(archive);
+    } else {
+        std::string sheetXml;
+        if (!readEntry(archive, part, sheetXml, error)) return false;
+
+        const size_t sheetDataStart = xmlp::findTagOpen(sheetXml, "sheetData", 0);
+        bool selfClosing = false;
+        if (sheetDataStart != std::string::npos) {
+            const size_t openEnd = sheetXml.find('>', sheetDataStart);
+            if (openEnd == std::string::npos) {
+                error = "WRITE_FAILED|Malformed sheetData element";
+                return false;
+            }
+            selfClosing = sheetXml[openEnd - 1] == '/';
+            size_t rowsFrom = openEnd + 1;
+            size_t rowsTo = openEnd;
+            if (selfClosing) {
+                prefix = sheetXml.substr(0, sheetDataStart) + "<sheetData>";
+                suffix = sheetXml.substr(openEnd + 1);
+            } else {
+                const size_t close = sheetXml.find("</sheetData>", openEnd);
+                if (close == std::string::npos) {
+                    error = "WRITE_FAILED|Malformed sheetData element";
+                    return false;
+                }
+                rowsFrom = openEnd + 1;
+                rowsTo = close;
+                prefix = sheetXml.substr(0, close);
+                suffix = sheetXml.substr(close + 12);
+            }
+            startRow = lastRowNumber(sheetXml, rowsFrom, rowsTo) + 1;
+        } else {
+            // A worksheet without sheetData: start one right before </worksheet>.
+            const size_t close = sheetXml.find("</worksheet>");
+            if (close == std::string::npos) {
+                error = "WRITE_FAILED|Malformed worksheet part";
+                return false;
+            }
+            prefix = sheetXml.substr(0, close) + "<sheetData>";
+            suffix = "</worksheet>" + sheetXml.substr(close + 12);
+        }
+
+        header = headerMode == "yes" || (headerMode == "auto" && startRow == 1);
+        dropDimensionElement(prefix);
+    }
+
+    // Styles: appended rows may need number formats the template does not have.
+    { std::printf("[dbg] A3\n"); std::fflush(stdout); }
+    TemplateStyleBase base;
+    std::string stylesXml;
+    if (!readTemplateStyleBase(archive, base, stylesXml, error)) return false;
+
+    WritePlan effective = plan;
+    effective.includeHeader = header;
+    SheetStyles styles = buildSheetStyles(effective, base.firstNumFmtId, base.xfBaseIndex);
+    if (!applyTemplateStyles(stylesXml, styles, error)) return false;
+
+    // Declared at function scope: the stream producer handed to the assembly
+    // step must outlive it, and so must everything it captures by reference.
+    SheetRowStream rows(effective, table, styles, startRow);
+    bool prefixSent = false;
+    bool closingSent = false;
+    const std::function<bool(std::string&)> stream = [&](std::string& chunk) -> bool {
+        if (!prefixSent) {
+            prefixSent = true;
+            chunk = prefix;
+            return true;
+        }
+        if (rows.next(chunk)) return true;
+        if (!closingSent) {
+            closingSent = true;
+            chunk = "</sheetData>" + suffix;
+            return true;
+        }
+        return false;
+    };
+
+    std::vector<Replacement> replacements;
+    replacements.push_back({"xl/styles.xml", &stylesXml, nullptr});
+
+    WorkbookEdits edits;
+    if (!exists) {
+        createdXml = buildNewSheetXml(effective, styles, table);
+        if (!registerWorksheet(archive, plan.sheetName, part, edits, error)) return false;
+
+        replacements.push_back({"xl/workbook.xml", &edits.workbook, nullptr});
+        replacements.push_back({"xl/_rels/workbook.xml.rels", &edits.rels, nullptr});
+        replacements.push_back({"[Content_Types].xml", &edits.types, nullptr});
+        replacements.push_back({part, &createdXml, nullptr});
+    } else {
+        replacements.push_back({part, nullptr, &stream});
+    }
+
     return assemblePackage(archive, replacements, compression, out, error);
 }
 

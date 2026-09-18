@@ -1,8 +1,16 @@
 /**
- * TypeScript type definitions for baja-lite-xlsx
+ * TypeScript type definitions for baja-lite-xlsx (v2: all APIs are async).
  */
 
 declare module 'baja-lite-xlsx' {
+  /** Rows may be objects (keyed by column) or arrays (positional). */
+  export type TableRows = Array<Record<string, unknown>> | unknown[][];
+  /** Any iterable or async iterable of rows (generators, cursors, ...). */
+  export type AsyncTableRows =
+    | TableRows
+    | Iterable<Record<string, unknown> | unknown[]>
+    | AsyncIterable<Record<string, unknown> | unknown[]>;
+
   /**
    * Image data object returned in cells that hold a picture.
    */
@@ -73,7 +81,8 @@ declare module 'baja-lite-xlsx' {
      * How the worksheet is read. `"xlnt"` (default) builds the workbook model
      * and reads one sheet from it. `"xml"` reads the requested sheet straight
      * out of the package — shared strings, the style table and the sheet XML,
-     * nothing else — which is markedly faster on large files.
+     * nothing else — which is ~4x faster for projected and streamed reads on
+     * large files.
      *
      * Both engines return exactly the same rows, and a file that uses something
      * the direct reader does not model falls back to `"xlnt"` automatically. One
@@ -81,6 +90,13 @@ declare module 'baja-lite-xlsx' {
      * `"xlnt"`, because streamed rows are handed over as they are produced.
      */
     engine?: 'xlnt' | 'xml';
+
+    /**
+     * `"typed"` turns numbers, booleans and dates into real JS values instead
+     * of formatted strings (numbers keep full precision, dates come back as
+     * `Date`). Requires `engine: 'xml'`. Default: `"string"`.
+     */
+    values?: 'string' | 'typed';
 
     /**
      * Stream rows in batches instead of returning them all: memory stays flat
@@ -95,6 +111,11 @@ declare module 'baja-lite-xlsx' {
 
   /** A single output row: plain string values or image objects. */
   export type ReadTableRow = Record<string, string | ImageDataObject | ImageDataObject[]>;
+  /** Row shape produced with `values: 'typed'`. */
+  export type TypedReadTableRow = Record<
+    string,
+    string | number | boolean | Date | ImageDataObject | ImageDataObject[]
+  >;
 
   /** Result shape when `includeWarnings` is true. */
   export interface ReadTableResult {
@@ -121,12 +142,15 @@ declare module 'baja-lite-xlsx' {
   }
 
   /**
-   * Reads an Excel table synchronously and returns one object per row.
+   * Reads an Excel table and resolves to one object per data row.
    *
    * All cell values are strings; a cell holding pictures contains an
    * ImageDataObject (or an array of them when several images attach to the
-   * same cell). NOTE: the whole parse runs on the calling thread -- for large
-   * files or Electron UIs prefer `readTableAsJSONAsync`.
+   * same cell). Pass `values: 'typed'` (with `engine: 'xml'`) to get real
+   * numbers, booleans and `Date` objects instead.
+   *
+   * Invalid arguments throw synchronously; parse failures reject. Parsing runs
+   * on the libuv thread pool, so the event loop is not blocked.
    *
    * @param input File path, Buffer, or base64 string.
    * @param options See ReadTableOptions.
@@ -138,26 +162,15 @@ declare module 'baja-lite-xlsx' {
   export function readTableAsJSON(
     input: string | Buffer,
     options: ReadTableOptions & { onBatch: OnBatch }
-  ): ReadTableStreamResult;
+  ): Promise<ReadTableStreamResult>;
   export function readTableAsJSON(
     input: string | Buffer,
     options: ReadTableOptions & { includeWarnings: true }
-  ): ReadTableResult;
-  export function readTableAsJSON(input: string | Buffer, options?: ReadTableOptions): ReadTableRow[];
-
-  /**
-   * Async variant of `readTableAsJSON`: parsing runs on the libuv thread pool
-   * so the event loop is not blocked. Same options and error codes.
-   */
-  export function readTableAsJSONAsync(
-    input: string | Buffer,
-    options: ReadTableOptions & { onBatch: OnBatch }
-  ): Promise<ReadTableStreamResult>;
-  export function readTableAsJSONAsync(
-    input: string | Buffer,
-    options: ReadTableOptions & { includeWarnings: true }
   ): Promise<ReadTableResult>;
-  export function readTableAsJSONAsync(input: string | Buffer, options?: ReadTableOptions): Promise<ReadTableRow[]>;
+  export function readTableAsJSON(
+    input: string | Buffer,
+    options?: ReadTableOptions
+  ): Promise<ReadTableRow[]>;
 
   /** Per-column configuration for `writeTableAsJSON`. */
   export interface WriteColumnOptions {
@@ -176,12 +189,33 @@ declare module 'baja-lite-xlsx' {
   }
 
   export interface WriteTableOptions {
-    /** Worksheet name. Default: "Sheet1". */
+    /**
+     * Worksheet name. Default: "Sheet1" for a new workbook. With
+     * `sourceFile`: the sheet the rows are appended to; a sheet that does not
+     * exist yet is created (this is how multi-sheet workbooks are built by
+     * chaining calls).
+     */
     sheetName?: string;
-    /** Write a header row from the column headers. Default: true. */
+    /**
+     * Write a header row from the column headers. Default: true for a fresh
+     * workbook; with `sourceFile` the default is "auto" — the header is
+     * written only when the sheet was created or had no rows, so chained
+     * appends do not duplicate it.
+     */
     includeHeader?: boolean;
-    /** Freeze the header row. Default: false. */
+    /** Freeze the header row (fresh sheets only). Default: false. */
     freezeHeader?: boolean;
+    /**
+     * Workbook to write into: a file path, or a Buffer returned by any write
+     * call. Default `append: true` adds the rows after the sheet's last row;
+     * `append: false` replaces the sheet's data instead.
+     */
+    sourceFile?: string | Buffer;
+    /**
+     * Append after the sheet's existing rows (default) instead of replacing
+     * them. Only meaningful together with `sourceFile`.
+     */
+    append?: boolean;
     /** Write the file natively instead of returning a Buffer. */
     output?: string;
     /** Compression level: 0 (store) .. 9 (maximum). Default: 6. */
@@ -193,14 +227,6 @@ declare module 'baja-lite-xlsx' {
      * When omitted, columns come from the keys of the first row object.
      */
     columns?: Record<string, WriteColumnOptions> | WriteColumnOptions[];
-
-    /**
-     * Existing workbook to write into (path or bytes). Only the target sheet's
-     * data is replaced and every other part is copied byte for byte, so other
-     * sheets, images and styles survive unchanged. Without it a new workbook is
-     * created.
-     */
-    template?: string | Buffer;
   }
 
   /** Summary returned when `output` was written by the native layer. */
@@ -214,42 +240,26 @@ declare module 'baja-lite-xlsx' {
   }
 
   /**
-   * Writes a JSON array into a worksheet and returns the .xlsx bytes.
+   * Writes a JSON array into a worksheet and resolves to the .xlsx bytes (or
+   * a summary when `output` is given).
    *
    * Numbers are written as numbers, booleans as booleans and `Date` objects as
-   * Excel dates with an automatic date format, so the values stay computable in
-   * Excel instead of becoming text.
+   * Excel dates, so the values stay computable in Excel instead of becoming
+   * text. Rows may also be any iterable or async iterable (a generator, a
+   * database cursor, ...): they are folded into the write batch by batch, so
+   * the table never has to exist in JS at once (`columns` is required then,
+   * since it cannot be inferred from a first row).
    *
-   * @throws Error with a `code` property: INVALID_OPTIONS / FILE_WRITE_FAILED /
-   *   WRITE_FAILED / ADDON_LOAD_FAILED.
+   * Invalid arguments throw synchronously; write failures reject.
+   *
+   * @throws Error with a `code` property: INVALID_OPTIONS / FILE_OPEN_FAILED /
+   *   SHEET_NOT_FOUND / FILE_WRITE_FAILED / WRITE_FAILED / ADDON_LOAD_FAILED.
    */
   export function writeTableAsJSON(
-    rows: TableRows,
-    options: WriteTableOptions & { output: string }
-  ): WriteResult;
-  export function writeTableAsJSON(
-    rows: TableRows,
-    options?: WriteTableOptions
-  ): Buffer;
-
-  /**
-   * Asynchronous `writeTableAsJSON`. The rows are copied into a compact native
-   * snapshot on the calling thread (the data lives in JS, so that part cannot
-   * move) and everything expensive — worksheet XML, deflate, package assembly
-   * and the file write — runs on the libuv thread pool. The event loop stays
-   * free, so servers and Electron UIs keep responding while a large workbook is
-   * produced. Same options, same result; failures reject with the same `code`.
-   *
-   * Rows may also be any iterable or async iterable (a generator, a database
-   * cursor, ...): they are folded into the snapshot batch by batch, so the table
-   * never has to exist in JS at once. `options.columns` is required then, since
-   * it cannot be inferred from a first row.
-   */
-  export function writeTableAsJSONAsync(
     rows: AsyncTableRows,
     options: WriteTableOptions & { output: string }
   ): Promise<WriteResult>;
-  export function writeTableAsJSONAsync(
+  export function writeTableAsJSON(
     rows: AsyncTableRows,
     options?: WriteTableOptions
   ): Promise<Buffer>;
@@ -267,8 +277,10 @@ declare module 'baja-lite-xlsx' {
   }
 
   export interface UpdateCellsOptions {
-    /** Workbook to patch (path or bytes). */
-    template: string | Buffer;
+    /**
+     * Workbook to patch: a file path, or a Buffer returned by any write call.
+     */
+    sourceFile: string | Buffer;
     /** Cells to rewrite. Everything else is copied verbatim. */
     updates: CellUpdate[];
     /** Write the file natively instead of returning a Buffer. */
@@ -296,14 +308,10 @@ declare module 'baja-lite-xlsx' {
    * @throws Error with a `code` property: INVALID_OPTIONS / FILE_OPEN_FAILED /
    *   SHEET_NOT_FOUND / FILE_WRITE_FAILED / WRITE_FAILED.
    */
-  export function updateCells(options: UpdateCellsOptions & { output: string }): UpdateCellsResult;
-  export function updateCells(options: UpdateCellsOptions): Buffer;
-
-  /** Asynchronous `updateCells`: patching and compression run off the event loop. */
-  export function updateCellsAsync(
+  export function updateCells(
     options: UpdateCellsOptions & { output: string }
   ): Promise<UpdateCellsResult>;
-  export function updateCellsAsync(options: UpdateCellsOptions): Promise<Buffer>;
+  export function updateCells(options: UpdateCellsOptions): Promise<Buffer>;
 
   export interface RenderTemplateOptions {
     /** Template workbook (path or bytes). */
@@ -314,20 +322,18 @@ declare module 'baja-lite-xlsx' {
      */
     sheetName?: string;
     /**
-     * Throw `TEMPLATE_ERROR` when a `${...}` marker has no value (default), or
-     * substitute an empty string when false.
+     * Native `${...}` markers only: throw `TEMPLATE_ERROR` when a marker has
+     * no value (default), or substitute an empty string when false.
      */
     strict?: boolean;
     /**
-     * Keep the parsed template structure (row layout, marker positions, shared
-     * strings) in a bounded in-process cache — useful when the same template is
-     * rendered repeatedly, as in a report server. Entries are keyed by the
-     * template's identity (its zip central directory: entry names, sizes and
-     * CRCs) plus the sheet filter, so a rewritten template is always picked up.
-     * The cache holds at most 8 templates / 64 MB. Default: false.
+     * Keep the parsed template structure in a bounded in-process cache —
+     * useful when the same template is rendered repeatedly, as in a report
+     * server. Entries are keyed by the template's identity, so a rewritten
+     * template is always picked up. Default: false.
      */
     cache?: boolean;
-    /** Write the file natively instead of returning a Buffer. */
+    /** Write the file instead of returning a Buffer. */
     output?: string;
     /** Compression level: 0 (store) .. 9 (maximum). Default: 6. */
     compression?: number;
@@ -336,21 +342,40 @@ declare module 'baja-lite-xlsx' {
   export interface RenderTemplateResult {
     /** Size of the written package in bytes. */
     bytes: number;
-    /** Worksheet parts that were rewritten. */
+    /** Worksheets that were rewritten. */
     sheets: string[];
   }
 
   /**
    * Renders a template workbook.
    *
-   * Supported markers inside cell text:
+   * Two marker styles are understood inside cell text, selected per sheet:
    *
-   * - `${path}` — value at `path` (`${user.name}`, `${items.0.amount}`),
-   *   resolved against the current `{{#each}}` item first; `../name` steps out
-   *   of a loop and `${@index}` is the 0-based loop index.
-   * - `{{#each path}}` / `{{/each}}` — the rows between the markers repeat once
-   *   per array item. Marker cells are removed, and a row that only held
-   *   markers disappears.
+   * 1. ejsExcel syntax — `<%...%>` markers evaluated as JavaScript:
+   *      `<%=expr%>`   emit the value as text
+   *      `<%~expr%>`   emit a number/Date so the cell's number format applies
+   *      `<%#expr%>`   dynamic formula ("=SUM(A1,A2)"); pair with `<%~result%>`
+   *                    to also cache the computed value
+   *      `<%forRow item,i in _data_.list%>`    repeat the marker row per item
+   *      `<%forRBegin ...%>` ... `<%forREnd%>` repeat the rows in between
+   *      `<%forCell key in [...]%>`            repeat the cell horizontally
+   *      `<%ifCBegin cond%>` ... `<%ifCEnd%>`  conditional region
+   *      `_row` / `_col` / `_rc`               emitted row, column, cell ref
+   *      `_charPlus_(col,n)` / `_charToNum_(col)`   column arithmetic
+   *      `_mergeCellFn_(range)`                merge cells
+   *      `_outlineLevel_(n)`                   row grouping
+   *      `_dataValidation_({sqref, formula1})` dropdown validation
+   *      `_img_({imgPh, cellNumAdd, rowNumAdd})`  image from URL / Buffer /
+   *                                              base64 / file path
+   *      `_qrcode_({text, size, ...})`         QR code (`npm install qrcode`)
+   *    `_data_` is the values argument; when it is an array, `_data_[i]` is
+   *    sheet i's data (workbook order). Every sheet that contains markers is
+   *    rendered. Images require the template to already contain a picture.
+   *
+   * 2. Native markers, rendered on the worker thread without JS evaluation:
+   *      `${path}`  the value at `path`; `../name` steps out of a loop and
+   *                 `${@index}` is the loop index
+   *      `{{#each path}}` ... `{{/each}}`  repeat the rows in between
    *
    * Repeated rows are copies of the template row XML, so styles, number
    * formats, row heights, merged cells and conditional formats are preserved.
@@ -361,21 +386,11 @@ declare module 'baja-lite-xlsx' {
    *   SHEET_NOT_FOUND / TEMPLATE_ERROR / FILE_WRITE_FAILED / WRITE_FAILED.
    */
   export function renderTemplate(
-    values: Record<string, unknown>,
-    options: RenderTemplateOptions & { output: string }
-  ): RenderTemplateResult;
-  export function renderTemplate(
-    values: Record<string, unknown>,
-    options: RenderTemplateOptions
-  ): Buffer;
-
-  /** Asynchronous `renderTemplate`: the render runs off the event loop. */
-  export function renderTemplateAsync(
-    values: Record<string, unknown>,
+    values: Record<string, unknown> | unknown[],
     options: RenderTemplateOptions & { output: string }
   ): Promise<RenderTemplateResult>;
-  export function renderTemplateAsync(
-    values: Record<string, unknown>,
+  export function renderTemplate(
+    values: Record<string, unknown> | unknown[],
     options: RenderTemplateOptions
   ): Promise<Buffer>;
 }

@@ -10,20 +10,30 @@
 
 ## 特性
 
-- 一行调用即可把工作表读成 JSON 数组：`readTableAsJSON` / `readTableAsJSONAsync`
-- 输入支持文件路径、`Buffer` 或 base64 字符串
-- 图片提取：浮动图片（`twoCellAnchor`）、嵌入式图片（`oneCellAnchor`）以及
-  WPS 的 `DISPIMG` / `cellimages.xml` 图片
+- **全部 API 均为异步**：只有四个函数，全部返回 Promise；重活（解析、XML 生成、
+  deflate、压缩包装配、写文件）都在 libuv 线程池执行，服务端与 Electron UI 始终
+  响应
+- 读取：`readTableAsJSON`，一行调用把工作表读成 JSON 数组
+- 写入：`writeTableAsJSON` —— 可向任意 sheet **追加**行，并通过在返回的
+  `Buffer` 上链式调用构建多 sheet 工作簿
+- 单元格级修补：`updateCells`
+- 模板渲染：`renderTemplate`，支持 ejsExcel 风格的 `<%...%>` 标记（行循环、动态
+  公式、合并单元格、图片、二维码）以及简单的原生 `${...}` 标记
+- 输入输出均支持文件路径或 `Buffer` —— 写入结果可直接作为下一次调用的
+  `sourceFile` 链式使用
+- 读取时可提取图片：浮动图片（`twoCellAnchor`）、嵌入式图片（`oneCellAnchor`）
+  以及 WPS 的 `DISPIMG` / `cellimages.xml` 图片
+- 类型化读取（`values: 'typed'`）：数字、布尔、日期返回真实 JS 值
 - 对真实文件足够健壮：带私有关系类型或反斜杠 ZIP 条目名的 WPS 工作簿会自动
   通过“清洗副本”加载
-- 异步版本在线程池执行，不阻塞事件循环
 - 读取上限（`maxRows` / `maxCols`）与单条目大小限制，抵御恶意文件
 - 错误码（`err.code`）与非致命诊断信息（`warnings`）
 - Windows / Linux / macOS 预编译二进制，采用 **N-API v8**：每个平台+架构只需
   一个二进制，即可覆盖所有 Node.js ≥ 16 与所有 Electron 版本
 
-> 所有单元格值都以**字符串**返回（数字、日期同理；日期格式为
-> `YYYY-MM-DD[ HH:MM:SS]`）。含图片的单元格返回图片对象。
+> 默认所有单元格值都以**字符串**返回（数字、日期同理；日期格式为
+> `YYYY-MM-DD[ HH:MM:SS]`）。含图片的单元格返回图片对象；传 `values: 'typed'`
+> 可获得真实类型。
 
 ## 安装
 
@@ -37,96 +47,92 @@ npm install baja-lite-xlsx
 ## 快速开始
 
 ```javascript
-const { readTableAsJSON, readTableAsJSONAsync } = require('baja-lite-xlsx');
-const fs = require('fs');
+const { readTableAsJSON, writeTableAsJSON, updateCells, renderTemplate } =
+  require('baja-lite-xlsx');
 
-// 文件路径
-// => [ { name: '张三', 金额: '1200' },
-//      { name: '李四', 金额: '980' } ]
-const rows = readTableAsJSON('data.xlsx', {
-  sheetName: 'Sheet1',           // 不传则读取第一个工作表
-  headerRow: 0,                  // 表头行（从 0 开始）
-  skipRows: [1, 2],              // 跳过的行
-  headerMap: { '名称': 'name' }  // 表头重命名
+// 读取：=> [ { 姓名: '张三', 金额: '1200' }, { 姓名: '李四', 金额: '980' } ]
+const rows = await readTableAsJSON('data.xlsx', {
+  sheetName: 'Sheet1',       // 不传则读取第一个工作表
+  columns: ['金额'],          // 只读这些列，其余列根本不会被读取
+  values: 'typed',           // 配合 engine: 'xml' 返回真实类型
+  engine: 'xml'              // 直读引擎：大文件更快
 });
 
-// Buffer，返回结构同上
-const rows2 = readTableAsJSON(fs.readFileSync('data.xlsx'));
+// 写入：=> Buffer
+const bytes = await writeTableAsJSON(rows2, { sheetName: 'Data' });
 
-// base64（建议显式声明；启发式判定要求解码后是 ZIP 头）
-const rows3 = readTableAsJSON(base64String, { inputEncoding: 'base64' });
+// 链式：向同一 sheet 追加行，再新增第二个 sheet。
+// sourceFile 之外的内容保持原样。
+const withMore = await writeTableAsJSON(rows3, { sourceFile: bytes, sheetName: 'Data' });
+const multiSheet = await writeTableAsJSON(summaryRows, { sourceFile: withMore, sheetName: 'Summary' });
 
-// 非致命诊断信息
-// => { rows: [ { ... } ], warnings: [ "Sheet 'Sheet1' truncated to 100000 of 500000 rows (maxRows)" ] }
-const { rows: rows4, warnings } = readTableAsJSON('data.xlsx', { includeWarnings: true });
-
-// 只读需要的列：表头文字或 Excel 列标（"B"、"C:E"），其余列根本不会被读取
-// => [ { 金额: '1200' }, { 金额: '980' } ]
-const amounts = readTableAsJSON('big.xlsx', { columns: ['金额'] });
-
-// 异步：解析不在事件循环上执行，返回结构同上
-const rows5 = await readTableAsJSONAsync('big.xlsx', { maxRows: 100000 });
-
-// 只要数值时跳过整条图片处理链路（不再二次遍历压缩包、不解压媒体）
-const rows6 = await readTableAsJSONAsync('big.xlsx', { includeImages: false });
-
-// 百万行表：分批流式处理，内存保持恒定
-// => { rowCount: 1250000, warnings: [] }
-const { rowCount } = await readTableAsJSONAsync('huge.xlsx', {
-  batchSize: 50000,
-  onBatch(rows) {
-    writeToDatabase(rows);
-  }
+// 修补单元格
+const patched = await updateCells({
+  sourceFile: multiSheet,
+  updates: [{ cell: 'B7', value: 1234.5, numberFormat: '#,##0.00' }]
 });
+
+// 渲染模板（单元格内为 ejsExcel 语法标记）
+const report = await renderTemplate(
+  { title: '一季度', items: [{ name: '甲', amount: 1 }, { name: '乙', amount: 2 }] },
+  { template: 'report-template.xlsx' }
+);
+
+// 把任意结果写到磁盘
+await writeTableAsJSON(rows2, { output: 'out.xlsx' }); // => { bytes, rowCount, sheetName }
 ```
 
 ## API
 
 ### readTableAsJSON(input, options?)
 
-同步接口，解析期间会阻塞调用线程——大文件、服务端或 Electron 界面请优先使用
-`readTableAsJSONAsync`。
+读取一个工作表，解析为 JSON 数组（每个数据行一个对象）。解析在 libuv 线程池执行，
+事件循环（以及 Electron 界面）保持响应。参数不合法时**同步抛出**；解析失败时
+reject。
 
-| 选项 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `sheetName` | `string` | 第一个工作表 | 要读取的工作表 |
-| `headerRow` | `number` | `0` | 表头行索引（从 0 开始，非负整数） |
-| `skipRows` | `number[]` | `[]` | 需要跳过的行索引（从 0 开始） |
-| `headerMap` | `Record<string,string>` | `{}` | 输出对象的表头重命名映射 |
-| `inputEncoding` | `'base64'` | – | 强制按 base64 解析字符串输入 |
-| `maxRows` | `number` | `0` | 每个工作表读取行数上限（0 表示不限制）；超出部分截断并通过 `warnings` 上报 |
-| `maxCols` | `number` | `0` | 每个工作表读取列数上限（0 表示不限制） |
-| `columns` | `string[]` | `[]` | 只读这些列：表头文字（`"金额"`）或 Excel 列标（`"B"`、`"C:E"`）；空数组表示全部列 |
-| `includeImages` | `boolean` | `true` | 为 `false` 时跳过整条图片处理链路（不二次遍历压缩包、不解压媒体） |
-| `includeWarnings` | `boolean` | `false` | 返回 `{ rows, warnings }` 而非仅行数组 |
+| 参数 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `input` | `string \| Buffer` | **必传** | – | 文件路径、工作簿字节或 base64 字符串 |
+| `options` | `object` | 否 | `{}` | 选项，见下表 |
 
-**返回** `Array<Object>`：每个数据行一个普通对象，键为应用 `headerMap` 之后的表头
-文字，值全部为字符串；单元格内是图片时则为 `ImageDataObject`：
+**选项**
+
+| 选项 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `sheetName` | `string` | 否 | 第一个工作表 | 要读取的工作表 |
+| `headerRow` | `number` | 否 | `0` | 表头行索引（从 0 开始） |
+| `skipRows` | `number[]` | 否 | `[]` | 需要跳过的行索引（从 0 开始） |
+| `headerMap` | `object` | 否 | `{}` | 表头重命名：`{ 原表头: '新表头' }` |
+| `inputEncoding` | `'base64'` | 否 | – | 强制按 base64 解析字符串输入 |
+| `maxRows` | `number` | 否 | `0` | 读取行数上限（0 不限制）；截断通过 `warnings` 上报 |
+| `maxCols` | `number` | 否 | `0` | 读取列数上限（0 不限制） |
+| `columns` | `string[]` | 否 | `[]` | 只读这些列：表头文字（`"金额"`）或 Excel 列标（`"B"`、`"C:E"`）；未选中的列根本不会被读取 |
+| `engine` | `'xlnt' \| 'xml'` | 否 | `'xlnt'` | `'xml'` 直接从压缩包读取工作表（投影/流式场景显著更快）；文件需要完整模型时自动回退 |
+| `values` | `'string' \| 'typed'` | 否 | `'string'` | `'typed'` 返回真实的数字、布尔与 `Date`（需 `engine: 'xml'`） |
+| `includeImages` | `boolean` | 否 | `true` | 为 `false` 时跳过整条图片处理链路 |
+| `includeWarnings` | `boolean` | 否 | `false` | 返回 `{ rows, warnings }` 而非仅行数组 |
+| `onBatch` | `function` | 否 | – | 分批流式回调；此时返回 `{ rowCount, warnings }` |
+| `batchSize` | `number` | 否 | `50000` | `onBatch` 每批行数 |
+
+**返回** `Promise<Array<Object>>`：每个数据行一个对象，键为应用 `headerMap` 之后的
+表头文字，值全部为字符串；单元格内是图片时则为图片对象。传 `values: 'typed'` 时
+值为真实的数字、布尔与 `Date`。
+
+**示例**
 
 ```javascript
-// data.xlsx：| 名称 | 金额 | 照片 |
-[
-  { 名称: '张三', 金额: '1200', 照片: { data: <Buffer ...>, name: 'image1.png', type: 'image/png' } },
-  { 名称: '李四', 金额: '980', 照片: { data: <Buffer ...>, name: 'image2.png', type: 'image/png' } }
-]
+const rows = await readTableAsJSON('data.xlsx', { sheetName: 'Sheet1' });
+// => [ { name: '张三', 金额: '1200' }, { name: '李四', 金额: '980' } ]
+
+// 类型化：金额为 number，日期为 Date
+const typed = await readTableAsJSON('big.xlsx', { engine: 'xml', values: 'typed' });
+
+// 百万行表分批流式处理，内存恒定
+const { rowCount } = await readTableAsJSON('huge.xlsx', {
+  batchSize: 50000,
+  onBatch(batch, meta) { writeToDatabase(batch); }   // meta: { startIndex, count }
+});
 ```
-
-`includeWarnings: true` 时返回结构变为：
-
-```javascript
-{
-  rows: [ { 名称: '张三', 金额: '1200' } ],
-  warnings: [ "Sheet 'Sheet1' truncated to 2 of 900 rows (maxRows)" ]
-}
-```
-
-同一单元格挂载多张图片时值为 `ImageDataObject` 数组；未包含在 `columns` 中的列不会
-出现在结果里。
-
-### readTableAsJSONAsync(input, options?)
-
-参数与返回结构完全一致，返回 `Promise`；解析在 libuv 线程池执行，保持事件循环
-（以及 Electron 界面）响应。
 
 ### 图片归属规则
 
@@ -161,34 +167,90 @@ const { rowCount } = await readTableAsJSONAsync('huge.xlsx', {
 
 ## 写入
 
-### 用 JSON 新建工作簿
+### writeTableAsJSON(rows, options?)
+
+把行数据写进工作表，resolve 为 `.xlsx` 字节（传 `output` 时为摘要对象）。数字写为
+数值、布尔写为布尔、`Date` 写为真实日期——在 Excel 里仍可继续计算，而不会退化成
+文本。
+
+传 `sourceFile`（文件路径，或任意写入调用返回的 `Buffer`）时，行会**追加**到指定
+sheet——sheet 不存在时会自动创建，这正是通过在返回的 `Buffer` 上链式调用构建多
+sheet 工作簿的方式。传 `append: false` 则替换该 sheet 的数据；两种情况下工作簿其余
+部分（其他 sheet、图片、样式）都按字节搬运。
+
+| 参数 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `rows` | `Array \| Iterable \| AsyncIterable` | **必传** | – | 数据行：对象、数组，或任意（异步）可迭代对象（生成器、数据库游标等） |
+| `options` | `object` | 否 | `{}` | 选项，见下表 |
+
+**选项**
+
+| 选项 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `sheetName` | `string` | 否 | `'Sheet1'` | 工作表名；传 `sourceFile` 时为追加目标 sheet（不存在则创建） |
+| `sourceFile` | `string \| Buffer` | 否 | – | 写入目标工作簿：路径，或上一次 write / update / render 返回的 `Buffer` |
+| `append` | `boolean` | 否 | `true` | 追加到该 sheet 已有行之后；`false` 替换该 sheet 数据（仅在传 `sourceFile` 时有意义） |
+| `includeHeader` | `boolean` | 否 | `true`；传 `sourceFile` 时为 auto | 是否写表头行；"auto" 仅在 sheet 为新建或原本为空时写表头，链式追加不会重复表头 |
+| `freezeHeader` | `boolean` | 否 | `false` | 冻结表头行（仅新建 sheet） |
+| `columns` | `object \| array` | 否 | 取自首行 | 列定义：`{ 属性: { header, numberFormat, align, width } }` 或 `[{ key \| index, header, ... }]`。`rows` 为可迭代对象时**必传**（无法从首行推断） |
+| `output` | `string` | 否 | – | 由原生层直接写文件，而非返回 Buffer |
+| `compression` | `number` | 否 | `6` | 0（仅存储）.. 9（最大压缩） |
+
+**返回** `Promise<Buffer>` —— 完整工作簿；传 `output` 时为
+`Promise<{ bytes, rowCount, sheetName }>`。
+
+**示例**
 
 ```javascript
-const { writeTableAsJSON, updateCells } = require('baja-lite-xlsx');
+// 新建工作簿：=> Buffer
+const bytes = await writeTableAsJSON(rows, { sheetName: 'Data' });
 
-// 返回 Buffer
-const bytes = writeTableAsJSON(rows, { sheetName: 'Data' });
-fs.writeFileSync('out.xlsx', bytes);
+// 向同一 sheet 追加行（不会重复表头），再新增第二个 sheet——
+// 多 sheet 工作簿通过在返回的 Buffer 上链式调用构建：
+const more = await writeTableAsJSON(rows2, { sourceFile: bytes, sheetName: 'Data' });
+const multi = await writeTableAsJSON(summary, { sourceFile: more, sheetName: 'Summary' });
 
-// 或交给原生层直接落盘：=> { bytes, rowCount, sheetName }
-writeTableAsJSON(rows, {
-  output: 'out.xlsx',
-  columns: { amount: { header: '金额', numberFormat: '#,##0.00', width: 14 } }
+// 替换 sheet 数据而不是追加
+const replaced = await writeTableAsJSON(rows3, {
+  sourceFile: multi, sheetName: 'Data', append: false
+});
+
+// 从数据库游标流式写入，内存恒定（此时 columns 必传）
+await writeTableAsJSON(fromDatabase(), {
+  sheetName: 'Report',
+  columns: { id: {}, name: {}, amount: { numberFormat: '#,##0.00' } },
+  output: 'report.xlsx'   // => { bytes, rowCount, sheetName }
 });
 ```
 
-数字写为数值、布尔写为布尔、`Date` 写为带自动日期格式的真实日期——在 Excel 里
-仍可继续计算，而不会退化成文本。
+### updateCells(options)
 
-### 写入已有工作簿
+重写既有工作簿中的指定单元格。只有受影响的工作表会重新生成，压缩包其余部分按字节
+搬运，因此未触碰的 sheet、图片与样式原样保留。未传 `numberFormat` 时单元格保留
+原有样式；被改写单元格里残留的公式会被清除而不是留下过期值；不存在的单元格/行会按
+列序、行序正确插入。
+
+| 参数 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `options` | `object` | **必传** | – | 见下表 |
+
+**选项**
+
+| 选项 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `sourceFile` | `string \| Buffer` | **必传** | – | 要修补的工作簿：路径，或上一次 write / update / render 返回的 `Buffer` |
+| `updates` | `array` | **必传** | – | `{ sheet?, cell, value?, numberFormat? }` 条目；`cell` 为 A1 引用（`"B7"`），`sheet` 默认第一个工作表，`value` 可为字符串、数字、布尔、`Date` 或 `null`（清空） |
+| `output` | `string` | 否 | – | 由原生层直接写文件，而非返回 Buffer |
+| `compression` | `number` | 否 | `6` | 0（仅存储）.. 9（最大压缩） |
+
+**返回** `Promise<Buffer>` —— 修补后的工作簿；传 `output` 时为
+`Promise<{ bytes, cells }>`。
+
+**示例**
 
 ```javascript
-// 覆盖目标 sheet 的数据，其余部分原样保留（其他 sheet、图片、主题、样式按字节搬运）
-const buffer = writeTableAsJSON(rows, { template: 'template.xlsx' });
-
-// 修改指定单元格：返回 Buffer；传 output 时返回 { bytes, cells }
-const patched = updateCells({
-  template: 'book.xlsx',
+const patched = await updateCells({
+  sourceFile: 'book.xlsx',
   updates: [
     { cell: 'B7', value: 1234.5, numberFormat: '#,##0.00' },
     { cell: 'C7', value: '文本' },
@@ -197,109 +259,98 @@ const patched = updateCells({
 });
 ```
 
-`updateCells` 是就地打补丁：未传 `numberFormat` 时单元格保留原有样式；被改写单元格
-里残留的公式会被清除而不是留下过期值；不存在单元格/行会按列序、行序正确插入。未被
-列出的内容保持逐字节不变。
+### renderTemplate(values, options?)
 
-### 模板渲染
+渲染模板工作簿：填充单元格文本中的标记，resolve 为成品工作簿。重复行是**复制模板行
+的 XML**生成的，因此样式、数字格式、行高、合并单元格、条件格式都原样保留。只有文本
+含标记的单元格会被重写（且保留其样式），不含标记的工作表整表按字节搬运。标记既可以
+写在单元格里，也可以位于 `sharedStrings`，因此在 Excel 里手工制作的模板可以直接
+使用。
 
-```javascript
-const { renderTemplate } = require('baja-lite-xlsx');
+单元格文本支持两种标记风格，按工作表自动识别：
 
-// 模板单元格内容示例："报表 ${title}"、"{{#each items}}" / "{{/each}}"、"${name}"
-const buffer = renderTemplate(
-  { title: '一季度', items: [{ name: '甲', amount: 1 }, { name: '乙', amount: 2 }] },
-  { template: 'report-template.xlsx' }
-);
-```
-
-单元格文本里支持两种标记：
+**1. ejsExcel 语法** —— `<%...%>` 标记按真实 JavaScript 求值。`_data_` 即传入的
+values；当它是数组时，`_data_[i]` 为第 i 个工作表的数据（按工作簿顺序）。每个含标记
+的工作表都会被渲染。
 
 | 标记 | 含义 |
 |------|------|
-| `${path}` | 取 `path` 处的值（`${user.name}`、`${items.0.amount}`）。优先在当前 `{{#each}}` 项内查找，其次从根查找；`../name` 跳出循环，`${@index}` 是当前 0 起的循环下标。 |
-| `{{#each path}}` … `{{/each}}` | 两个标记之间的行按 `path` 数组逐项重复。 |
+| `<%=expr%>` | 把表达式的值作为单元格文本输出 |
+| `<%~expr%>` | 输出数字 / `Date`，使单元格的数字格式生效（日期转为 Excel 序列值） |
+| `<%#expr%>` | 动态公式：表达式求值为公式字符串（`"=SUM(A1,A2)"`）。配合 `<%~结果%>` 可同时写入预计算的缓存值——这正是 WPS 打开时公式显示 0、需双击才重算的解法 |
+| `<%forRow item,i in expr%>` | 标记所在行按 `expr` 逐项重复；循环变量（`item`、`i`）在整行范围内可用 |
+| `<%forRBegin item,i in expr%>` … `<%forREnd%>` | 两个标记之间的行按 `expr` 逐项重复 |
+| `<%forCell key in expr%>` | 标记所在单元格横向重复，每项一次 |
+| `<%ifCBegin cond%>` … `<%ifCEnd%>` | 两者之间的行仅在 `cond` 为真时输出 |
+| `_row` / `_col` / `_rc` | 当前输出行号（`12`）、列标（`F`）、单元格名（`F12`） |
+| `_charPlus_(col, n)` / `_charToNum_(col)` | 列运算：`"F"+3 → "I"`、`"F" → 6` |
+| `_mergeCellFn_(range)` | 合并单元格，如 `_mergeCellFn_("C"+_row+":E"+_row)` |
+| `_outlineLevel_(n)` | 给当前输出行设置分组层级 |
+| `_dataValidation_({sqref, formula1})` | 给指定区域提供下拉校验 |
+| `_img_({imgPh, cellNumAdd, rowNumAdd})` | 在当前单元格插入图片。`imgPh` 支持 **http(s) 链接、`Buffer`、base64 字符串、data: URI 或文件路径**；锚点横跨 `cellNumAdd` 列 × `rowNumAdd` 行。要求模板中至少已有一张图片（在其 drawing 结构上扩展） |
+| `_qrcode_({text, size, cellNumAdd, rowNumAdd})` | 为 `text` 生成二维码（需 `npm install qrcode`） |
 
-重复行是**复制模板行的 XML**生成的，因此样式、数字格式、行高、合并单元格、条件格式
-都原样保留。只有文本含标记的单元格会被重写（且保留其样式），不含标记的工作表整表
-按字节搬运。
+**2. 原生标记** —— 在工作线程上渲染，无需 JS 求值：
 
-标记既可以写在单元格里，也可以位于 `sharedStrings`（Excel 存储单元格文本的方式），
-因此在 Excel 里手工制作的模板可以直接使用。
+| 标记 | 含义 |
+|------|------|
+| `${path}` | 取 `path` 处的值（`${user.name}`、`${items.0.amount}`）。优先在当前 `{{#each}}` 项内查找；`../name` 跳出循环，`${@index}` 为循环下标。未知标记抛 `TEMPLATE_ERROR`（`strict: false` 则写空串） |
+| `{{#each path}}` … `{{/each}}` | 两个标记之间的行按 `path` 数组逐项重复 |
 
-只含标记的行视为分隔行；若 `{{#each}}` 所在行还有数据单元格，则该行就是第一条被
-重复的行。找不到值的标记会抛 `TEMPLATE_ERROR`（传 `strict: false` 则写为空串），
-`{{#each}}` 未闭合一定报错。
+| 参数 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `values` | `object \| array` | **必传** | – | 标记取值；`<%...%>` 语法下同时充当 `_data_`（数组 = 每个 sheet 的数据） |
+| `options` | `object` | **必传** | – | 见下表 |
 
-#### 复用模板：`cache: true`
+**选项**
+
+| 选项 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `template` | `string \| Buffer` | **必传** | – | 模板工作簿：路径或字节 |
+| `sheetName` | `string` | 否 | 全部 sheet | 只渲染该工作表 |
+| `strict` | `boolean` | 否 | `true` | 仅原生 `${...}` 标记：未知标记时抛错而不是写空串 |
+| `cache` | `boolean` | 否 | `false` | 把解析后的模板结构留在进程内有界缓存中（重复渲染完全跳过模板读取与扫描；模板被改写会被自动识别） |
+| `output` | `string` | 否 | – | 直接写文件，而非返回 Buffer |
+| `compression` | `number` | 否 | `6` | 0（仅存储）.. 9（最大压缩） |
+
+**返回** `Promise<Buffer>` —— 渲染后的工作簿；传 `output` 时为
+`Promise<{ bytes, sheets }>`（`sheets` 列出被渲染的工作表名）。
+
+**示例**
 
 ```javascript
-// 报表服务反复渲染同一个模板
-const filled = await renderTemplateAsync(values, { template, cache: true });
+// 模板单元格："报表 ${title}"                       （原生标记）
+//                "<%forRow it,i in _data_.items%>" / "<%=it.name%>" / "<%~it.qty%>"
+//                "<%#\"=SUM(C2:C99)\"%><%~99%>"     （动态公式 + 缓存值）
+//                "<%_img_({imgPh:\"https://cdn.example.com/logo.png\", cellNumAdd:3})%>"
+const buffer = await renderTemplate(
+  { title: '一季度', items: [{ name: '甲', qty: 1 }, { name: '乙', qty: 2 }] },
+  { template: 'report-template.xlsx' }
+);
+
+// 报表服务反复渲染同一个模板：
+const filled = await renderTemplate(values, { template, cache: true });
 ```
 
-解析后的模板结构（行布局、标记位置、sharedStrings 表）会留在进程内**有界缓存**中
-（最多 8 个模板 / 64 MB，LRU 淘汰），重复渲染因而完全跳过模板的读取与扫描。缓存键为
-模板身份（压缩包中央目录的条目名、大小与 CRC）加表名过滤，因此模板被改写一定会被
-识别。默认 `false`。
+`forRBegin` / `ifCBegin` 未闭合，或标记表达式求值出错，都会抛出带工作表名与单元格名
+的 `TEMPLATE_ERROR`。
 
-### 异步写入
+### 读取引擎与类型化读取
 
-三个写入函数都有异步孪生，返回值完全一致：
+默认（`engine: 'xlnt'`）会先把整个工作簿解析成模型，再从模型里读目标工作表。
+`engine: 'xml'` 跳过模型：直接从压缩包里读目标工作表（共享字符串、样式表、工作表
+XML），并在扫描过程中完成列投影、上限截断与表头解析。两个引擎返回的行**完全一致**；
+遇到直读器未建模的内容会自动回退到 `'xlnt'`。
 
-```javascript
-const {
-  writeTableAsJSONAsync, updateCellsAsync, renderTemplateAsync
-} = require('baja-lite-xlsx');
-
-await writeTableAsJSONAsync(rows, { output: 'report.xlsx' }); // { bytes, rowCount, sheetName }
-const patched = await updateCellsAsync({ template, updates });
-const filled = await renderTemplateAsync(values, { template });
-```
-
-行 / 更新 / 值会先在调用线程上拷入一份紧凑的原生快照（数据在 JS 里，这一步无法
-移出），随后所有重活（工作表 XML、deflate、压缩包装配、写文件）都在 libuv 线程池
-执行。服务端或 Electron 主进程在生成大工作簿时仍能继续处理请求；失败时 reject 的
-错误码与同步调用抛出的完全一致。
-
-### 流式写入
-
-`rows` 不必是数组。任意可迭代对象（异步版本还支持异步可迭代对象）都会**分批**写入，
-这正是数据库游标、生成器、文件解析器需要的形态：
+传 `values: 'typed'`（需 `engine: 'xml'`）时，读取器返回真实的 JavaScript 值而不是
+格式化字符串：
 
 ```javascript
-const { writeTableAsJSONAsync } = require('baja-lite-xlsx');
-
-async function* fromDatabase() {
-  for await (const batch of cursor) yield* batch;
-}
-
-// => { bytes, rowCount, sheetName }
-await writeTableAsJSONAsync(fromDatabase(), {
-  sheetName: 'Report',
-  columns: { id: {}, name: {}, amount: { numberFormat: '#,##0.00' } },
-  output: 'report.xlsx'
+const rows = await readTableAsJSON('big.xlsx', {
+  engine: 'xml', values: 'typed', columns: ['金额', '日期']
 });
+// => [ { 金额: 1200, 日期: Date 2026-01-15 }, ... ]
 ```
-
-行会以每批 20000 行的粒度折进与异步路径相同的**紧凑原生快照**（每单元格 16 字节，
-重复字符串只存一份），因此峰值内存是"一批 + 快照"，而不是整张表的一堆 JS 对象。
-同步的 `writeTableAsJSON` 同样接受可迭代对象，只是在调用线程上排空。两种情况下
-都必须显式给出 `options.columns`（无法从首行推断）。
-
-### 读取引擎：`engine: 'xml'`
-
-默认（`'xlnt'`）会先把整个工作簿解析成模型，再从模型里读目标工作表。`engine: 'xml'`
-跳过模型：直接从压缩包里读目标工作表（共享字符串、样式表、工作表 XML），并在扫描过程
-中完成列投影、上限截断与表头解析。
-
-```javascript
-const rows = readTableAsJSON('big.xlsx', { engine: 'xml', columns: ['金额'] });
-```
-
-两个引擎返回的行**完全一致**（日期、数字、布尔、错误文本、共享字符串的呈现方式都相同）；
-一旦遇到直读器未建模的东西，会自动回退到 `'xlnt'` 读取该文件，因此读取结果不会变差。
-唯一例外：开启了图片的**流式读取**（`onBatch`）仍走 `'xlnt'`，因为流式行是边产出边交出的。
 
 ## 性能
 
@@ -316,7 +367,7 @@ const rows = readTableAsJSON('big.xlsx', { engine: 'xml', columns: ['金额'] })
 1. 只需要少数几列时传 `columns`；
 2. 只要数值时传 `includeImages: false`；
 3. 用 `maxRows` / `maxCols` 限制探查读取的规模；
-4. 服务端与 Electron 用 `readTableAsJSONAsync`，多次读取可在 libuv 线程池并行
+4. 读取本身就在 libuv 线程池执行，多次读取可并行
    （由 `UV_THREADPOOL_SIZE` 控制并发度）；
 5. 表太大不宜整体物化时用 `onBatch` + `batchSize`。
 

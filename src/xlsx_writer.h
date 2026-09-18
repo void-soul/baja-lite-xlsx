@@ -89,7 +89,10 @@ SheetStyles buildSheetStyles(const WritePlan& plan, size_t firstNumFmtId = 164,
 // template-replacement paths.
 class SheetRowStream {
 public:
-    SheetRowStream(const WritePlan& plan, RowSource& source, SheetStyles& styles);
+    // `startRow` is the 1-based row number the first emitted row gets; appends
+    // pass the row after the sheet's current last row.
+    SheetRowStream(const WritePlan& plan, RowSource& source, SheetStyles& styles,
+                   size_t startRow = 1);
 
     // Appends the next piece to `chunk`; false once every row was produced.
     bool next(std::string& chunk);
@@ -102,6 +105,7 @@ private:
     SheetStyles& styles_;
     std::vector<std::string> letters_;
     std::vector<WriteCell> row_;
+    size_t startRow_ = 1;
     size_t emitted_ = 0;
     size_t totalRows_ = 0;
 };

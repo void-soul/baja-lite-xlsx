@@ -20,6 +20,8 @@ All three return a `Buffer` when no `output` path is given, and a small
 | 2 `updateCells` | 1.2.0 |
 | 3 `renderTemplate` | 1.3.0 |
 | Async twins for the write side | 1.4.0 |
+| Template structure cache | 1.5.0 |
+| Async-only API, `sourceFile` append / multi-sheet, ejsExcel engine, typed reads, single-pass full reads | 2.0.0 |
 | Template structure cache (`cache: true`) | 1.5.0 |
 | Write benchmarks (`bench/`) | 1.5.0 |
 | Streaming writes (iterable / async iterable rows) | 1.6.0 |

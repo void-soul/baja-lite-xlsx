@@ -3,7 +3,7 @@
  * Fixture: examples/sample.xlsx
  */
 
-const { readTableAsJSON, readTableAsJSONAsync } = require('../index');
+const { readTableAsJSON } = require('../index');
 const fs = require('fs');
 const path = require('path');
 
@@ -20,7 +20,7 @@ async function main() {
   console.log(`Capped read: ${capped.length} rows`);
 
   // 2. Diagnostics: collect warnings for unattached images etc.
-  const { rows, warnings } = await readTableAsJSONAsync(excelFile, {
+  const { rows, warnings } = await readTableAsJSON(excelFile, {
     includeWarnings: true
   });
   console.log(`Full read: ${rows.length} rows, ${warnings.length} warnings`);

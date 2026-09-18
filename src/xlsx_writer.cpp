@@ -324,8 +324,9 @@ std::string buildStylesXml(const SheetStyles& styles) {
     return xml;
 }
 
-SheetRowStream::SheetRowStream(const WritePlan& plan, RowSource& source, SheetStyles& styles)
-    : plan_(plan), source_(source), styles_(styles) {
+SheetRowStream::SheetRowStream(const WritePlan& plan, RowSource& source, SheetStyles& styles,
+                               size_t startRow)
+    : plan_(plan), source_(source), styles_(styles), startRow_(startRow) {
     letters_.resize(plan.columns.size());
     for (size_t i = 0; i < plan.columns.size(); ++i) {
         letters_[i] = columnLetters(i + 1);
@@ -343,12 +344,12 @@ bool SheetRowStream::next(std::string& chunk) {
     const size_t columnCount = plan_.columns.size();
 
     if (plan_.includeHeader && emitted_ == 0) {
-        chunk += "<row r=\"1\">";
+        chunk += "<row r=\"" + std::to_string(startRow_) + "\">";
         for (size_t i = 0; i < columnCount; ++i) {
             WriteCell cell;
             cell.kind = WriteCell::Kind::Text;
             cell.text = plan_.columns[i].header;
-            appendCellXml(chunk, letters_[i], 1, cell, 0);
+            appendCellXml(chunk, letters_[i], startRow_, cell, 0);
         }
         chunk += "</row>";
         ++emitted_;
@@ -366,7 +367,7 @@ bool SheetRowStream::next(std::string& chunk) {
         row_.assign(columnCount, WriteCell());
     }
 
-    const size_t rowNumber = emitted_ + 1;
+    const size_t rowNumber = startRow_ + emitted_;
     chunk += "<row r=\"" + std::to_string(rowNumber) + "\">";
     for (size_t i = 0; i < columnCount; ++i) {
         const WriteCell& cell = i < row_.size() ? row_[i] : WriteCell();

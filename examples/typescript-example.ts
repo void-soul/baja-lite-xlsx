@@ -3,7 +3,7 @@
  * Types come from index.d.ts.
  */
 
-import { readTableAsJSON, readTableAsJSONAsync, ImageDataObject } from 'baja-lite-xlsx';
+import { readTableAsJSON, readTableAsJSON, ImageDataObject } from 'baja-lite-xlsx';
 import * as fs from 'fs';
 
 interface UserRow {
@@ -20,7 +20,7 @@ console.log(`Rows: ${rows.length}`);
 
 // Async read with diagnostics
 async function main(): Promise<void> {
-  const { rows, warnings } = (await readTableAsJSONAsync('./sample.xlsx', {
+  const { rows, warnings } = (await readTableAsJSON('./sample.xlsx', {
     sheetName: 'Sheet1',
     headerRow: 0,
     includeWarnings: true

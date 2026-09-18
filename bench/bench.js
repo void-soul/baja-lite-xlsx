@@ -20,12 +20,9 @@ const fs = require('fs');
 
 const {
   readTableAsJSON,
-  readTableAsJSONAsync,
   writeTableAsJSON,
-  writeTableAsJSONAsync,
   updateCells,
-  renderTemplate,
-  renderTemplateAsync
+  renderTemplate
 } = require('..');
 
 function parseArgs(argv) {
@@ -117,9 +114,12 @@ async function main() {
 
   const results = [];
 
-  results.push(await measure('sync buffered', () => readTableAsJSON(args.file), args.iterations));
-  results.push(await measure('async buffered', () => readTableAsJSONAsync(args.file), args.iterations));
-  results.push(await measure('includeImages: false', () => readTableAsJSON(args.file, { includeImages: false }), args.iterations));
+  results.push(await measure('buffered', () => readTableAsJSON(args.file), args.iterations));
+  results.push(await measure(
+    'buffered, no images',
+    () => readTableAsJSON(args.file, { includeImages: false }),
+    args.iterations
+  ));
   // The direct XML reader (P3): same rows, without the workbook model.
   results.push(await measure('engine: xml', () => readTableAsJSON(args.file, { engine: 'xml' }), args.iterations));
   results.push(await measure(
@@ -130,7 +130,7 @@ async function main() {
 
   let firstHeader = null;
   try {
-    const probe = readTableAsJSON(args.file);
+    const probe = await readTableAsJSON(args.file);
     firstHeader = Object.keys((probe && probe[0]) || {})[0] || null;
   } catch (err) {
     // A headerless sheet cannot be probed; the projection run is skipped.
@@ -143,10 +143,10 @@ async function main() {
     ));
   }
 
-  if (typeof readTableAsJSONAsync === 'function') {
+  if (typeof readTableAsJSON === 'function') {
     results.push(await measure(
       `streamed onBatch (${args.batchSize})`,
-      () => readTableAsJSONAsync(args.file, { batchSize: args.batchSize, onBatch: () => {} }),
+      () => readTableAsJSON(args.file, { batchSize: args.batchSize, onBatch: () => {} }),
       args.iterations
     ));
   }
@@ -171,21 +171,16 @@ async function main() {
   console.log(`\n  write workload: ${writeRows.length} rows x 5 columns`);
 
   results.push(await measure(
-    'write sync',
-    () => asWritten(writeTableAsJSON(writeRows, writeOptions)),
-    args.iterations
-  ));
-  results.push(await measure(
-    'write async',
-    async () => asWritten(await writeTableAsJSONAsync(writeRows, writeOptions)),
+    'write (buffer)',
+    async () => asWritten(await writeTableAsJSON(writeRows, writeOptions)),
     args.iterations
   ));
 
   const writeTarget = path.join(__dirname, '.bench-write.xlsx');
   results.push(await measure(
-    'write sync -> file',
-    () => {
-      const summary = writeTableAsJSON(writeRows, { ...writeOptions, output: writeTarget });
+    'write -> file',
+    async () => {
+      const summary = await writeTableAsJSON(writeRows, { ...writeOptions, output: writeTarget });
       return { rowCount: writeRows.length, bytes: summary.bytes };
     },
     args.iterations
@@ -193,7 +188,7 @@ async function main() {
 
   // Patch a workbook that has the rows above: 200 scattered cells.
   const patchSource = path.join(__dirname, '.bench-patch.xlsx');
-  writeTableAsJSON(writeRows.slice(0, Math.min(writeRows.length, 1000)), {
+  await writeTableAsJSON(writeRows.slice(0, Math.min(writeRows.length, 1000)), {
     ...writeOptions,
     output: patchSource
   });
@@ -203,13 +198,16 @@ async function main() {
   }
   results.push(await measure(
     'updateCells (200 cells)',
-    () => ({ rowCount: updates.length, bytes: updateCells({ template: patchSource, updates }).length }),
+    async () => ({
+      rowCount: updates.length,
+      bytes: (await updateCells({ sourceFile: patchSource, updates })).length
+    }),
     args.iterations
   ));
 
   // Render a template whose loop expands to `rows` output rows.
   const templateFile = path.join(__dirname, '.bench-template.xlsx');
-  writeTableAsJSON(
+  await writeTableAsJSON(
     [
       ['name', 'amount'],
       ['{{#each items}}', ''],
@@ -225,17 +223,12 @@ async function main() {
 
   results.push(await measure(
     'renderTemplate',
-    () => asRendered(renderTemplate(templateValues, { template: templateFile })),
+    async () => asRendered(await renderTemplate(templateValues, { template: templateFile })),
     args.iterations
   ));
   results.push(await measure(
     'renderTemplate cache: true',
-    () => asRendered(renderTemplate(templateValues, { template: templateFile, cache: true })),
-    args.iterations
-  ));
-  results.push(await measure(
-    'renderTemplateAsync cache: true',
-    async () => asRendered(await renderTemplateAsync(
+    async () => asRendered(await renderTemplate(
       templateValues, { template: templateFile, cache: true }
     )),
     args.iterations

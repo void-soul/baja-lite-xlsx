@@ -30,12 +30,26 @@ struct CellImageMapping {
     std::string imageName;    // e.g., "image1.png"
 };
 
+// What a cell holds, next to its display text. Populated by the direct reader
+// while scanning; the JS bridge consults it only when the caller asked for
+// `values: 'typed'`.
+enum CellKind : uint8_t {
+    CellKindString = 0,
+    CellKindNumber = 1,
+    CellKindBoolean = 2,
+    CellKindDate = 3
+};
+
 // A single cell: plain text plus optional attached image indices.
 // Image attachment (business logic) is resolved here in C++ so that the
 // N-API boundary layer only converts values (AUDIT-20260917-034).
 struct CellValue {
     std::string text;
     std::vector<int> imageIndices; // indices into ExcelData::images
+    uint8_t kind = CellKindString;
+    // Raw value for numeric / date cells (dates are Excel serials); used by
+    // the `values: 'typed'` bridge, where the formatted text would lose data.
+    double number = 0;
 };
 
 struct SheetData {
@@ -90,6 +104,10 @@ struct ReadOptions {
     bool includeImages = true;        // false -> skip the whole image pipeline
     std::vector<std::string> columns; // empty -> every column
     ReadEngine engine = ReadEngine::Xlnt;
+    // values: 'typed' - the bridge turns numbers, booleans and dates into real
+    // JS values instead of the formatted strings. Only the direct reader
+    // populates the cell kinds, so the xlnt engine rejects the combination.
+    bool typedValues = false;
 };
 
 } // namespace baja_xlsx

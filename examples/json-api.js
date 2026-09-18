@@ -3,7 +3,7 @@
  * Fixture: examples/sample.xlsx
  */
 
-const { readTableAsJSONAsync } = require('../index');
+const { readTableAsJSON } = require('../index');
 const fs = require('fs');
 const path = require('path');
 
@@ -16,7 +16,7 @@ async function main() {
   }
 
   // 1. Basic read (first sheet, first row as header)
-  const rows = await readTableAsJSONAsync(excelFile);
+  const rows = await readTableAsJSON(excelFile);
   console.log(`Basic read: ${rows.length} rows`);
 
   // 2. Header mapping
@@ -25,21 +25,21 @@ async function main() {
   Object.keys(first).forEach((k) => {
     headerMap[k] = k.trim().toLowerCase().replace(/\s+/g, '_');
   });
-  const mapped = await readTableAsJSONAsync(excelFile, { headerMap });
+  const mapped = await readTableAsJSON(excelFile, { headerMap });
   console.log('Mapped first row:', mapped[0]);
 
   // 3. Buffer + base64 input
   const buffer = fs.readFileSync(excelFile);
-  const fromBuffer = await readTableAsJSONAsync(buffer);
+  const fromBuffer = await readTableAsJSON(buffer);
   console.log(`Buffer read: ${fromBuffer.length} rows`);
 
-  const fromBase64 = await readTableAsJSONAsync(buffer.toString('base64'), {
+  const fromBase64 = await readTableAsJSON(buffer.toString('base64'), {
     inputEncoding: 'base64'
   });
   console.log(`Base64 read: ${fromBase64.length} rows`);
 
   // 4. Image cells (if the fixture contains images)
-  const withWarnings = await readTableAsJSONAsync(excelFile, {
+  const withWarnings = await readTableAsJSON(excelFile, {
     headerMap,
     includeWarnings: true
   });

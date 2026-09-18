@@ -10,21 +10,31 @@ extracting embedded images, built on [xlnt](https://github.com/tfussell/xlnt) an
 
 ## Features
 
-- Read a sheet as JSON rows with a single call: `readTableAsJSON` / `readTableAsJSONAsync`
-- Input as file path, `Buffer`, or base64 string
-- Image extraction: floating images (`twoCellAnchor`), embedded images
+- **Everything is async.** Four functions, all returning Promises; heavy work
+  (parsing, XML generation, deflate, package assembly, file writes) runs on the
+  libuv thread pool, so servers and Electron UIs keep responding
+- Read a sheet as JSON rows: `readTableAsJSON`
+- Write JSON into a workbook: `writeTableAsJSON` — appends to any sheet and
+  builds multi-sheet workbooks by chaining on the returned `Buffer`
+- Patch individual cells: `updateCells`
+- Render templates with ejsExcel-style `<%...%>` markers (loops, dynamic
+  formulas, merges, images, QR codes) or simple native `${...}` markers:
+  `renderTemplate`
+- Input and output as file path or `Buffer` — write results chain directly into
+  the next call as `sourceFile`
+- Image extraction on read: floating images (`twoCellAnchor`), embedded images
   (`oneCellAnchor`) and WPS `DISPIMG` / `cellimages.xml` images
+- Typed reads (`values: 'typed'`): numbers, booleans and dates as real JS values
 - Robust against real-world files: WPS workbooks with proprietary relationship
   types or backslash ZIP entry names are loaded through a sanitized copy
-- Non-blocking async variant running on the libuv thread pool
 - Read caps (`maxRows` / `maxCols`) and per-entry size limits against hostile files
 - Coded errors (`err.code`) plus non-fatal diagnostics (`warnings`)
 - Prebuilt binaries for Windows / Linux / macOS as **N-API v8**: one binary per
   platform+architecture covers every Node.js >= 16 and every Electron version
 
-> Every cell value is returned as a **string** (numbers and dates included;
-> dates are formatted as `YYYY-MM-DD[ HH:MM:SS]`). Cells containing pictures
-> return image objects instead.
+> By default every cell value is returned as a **string** (numbers and dates
+> included; dates are formatted as `YYYY-MM-DD[ HH:MM:SS]`). Cells containing
+> pictures return image objects instead; pass `values: 'typed'` for real types.
 
 ## Install
 
@@ -40,101 +50,93 @@ the required runtime DLLs.
 ## Quick start
 
 ```javascript
-const { readTableAsJSON, readTableAsJSONAsync } = require('baja-lite-xlsx');
-const fs = require('fs');
+const { readTableAsJSON, writeTableAsJSON, updateCells, renderTemplate } =
+  require('baja-lite-xlsx');
 
-// From a file path
-// => [ { fullName: 'Ada',  age: '36' },
-//      { fullName: 'Alan', age: '41' } ]
-const rows = readTableAsJSON('data.xlsx', {
-  sheetName: 'Sheet1',                                  // default: first sheet
-  headerRow: 0,                                         // header row (0-based)
-  skipRows: [1, 2],                                     // rows to skip
-  headerMap: { 'name': 'fullName', 'age': 'age' }       // rename headers
+// Read: => [ { fullName: 'Ada', age: '36' }, { fullName: 'Alan', age: '41' } ]
+const rows = await readTableAsJSON('data.xlsx', {
+  sheetName: 'Sheet1',                                // default: first sheet
+  columns: ['Amount'],                                // only these columns are read
+  values: 'typed',                                    // engine: 'xml' -> real types
+  engine: 'xml'                                       // direct reader: fastest on big files
 });
 
-// From a Buffer -- identical result shape
-const rows2 = readTableAsJSON(fs.readFileSync('data.xlsx'));
+// Write: => Buffer
+const bytes = await writeTableAsJSON(rows2, { sheetName: 'Data' });
 
-// From base64 (pass the option explicitly; the heuristic requires ZIP magic)
-const rows3 = readTableAsJSON(base64String, { inputEncoding: 'base64' });
+// Chain: append more rows to the same sheet, then add a second sheet.
+// Everything after `sourceFile` keeps the rest of the workbook untouched.
+const withMore = await writeTableAsJSON(rows3, { sourceFile: bytes, sheetName: 'Data' });
+const multiSheet = await writeTableAsJSON(summaryRows, { sourceFile: withMore, sheetName: 'Summary' });
 
-// Non-fatal diagnostics
-// => { rows: [ { ... } ], warnings: [ "Sheet 'Sheet1' truncated to 100000 of 500000 rows (maxRows)" ] }
-const { rows: rows4, warnings } = readTableAsJSON('data.xlsx', { includeWarnings: true });
-
-// Only the columns you need: header text or Excel reference ("B", "C:E").
-// Unrequested columns are never read, so this is also the fast path.
-// => [ { Amount: '1200' }, { Amount: '980' } ]
-const amounts = readTableAsJSON('big.xlsx', { columns: ['Amount'] });
-
-// Async: parsing runs off the event loop, same return shape
-const rows5 = await readTableAsJSONAsync('big.xlsx', { maxRows: 100000 });
-
-// Skip the image pipeline entirely when you only need values:
-// no second pass over the archive, no media decompression.
-const rows6 = await readTableAsJSONAsync('big.xlsx', { includeImages: false });
-
-// Million-row sheet: stream it in batches, memory stays flat.
-// => { rowCount: 1250000, warnings: [] }
-const { rowCount } = await readTableAsJSONAsync('huge.xlsx', {
-  batchSize: 50000,
-  onBatch(rows, meta) {
-    // rows: up to 50000 row objects; meta: { startIndex, count }
-    writeToDatabase(rows);
-  }
+// Patch individual cells
+const patched = await updateCells({
+  sourceFile: multiSheet,
+  updates: [{ cell: 'B7', value: 1234.5, numberFormat: '#,##0.00' }]
 });
+
+// Render a template (ejsExcel syntax in the cells)
+const report = await renderTemplate(
+  { title: 'Q1', items: [{ name: 'a', amount: 1 }, { name: 'b', amount: 2 }] },
+  { template: 'report-template.xlsx' }
+);
+
+// Write any of the results to disk
+await writeTableAsJSON(rows2, { output: 'out.xlsx' }); // => { bytes, rowCount, sheetName }
 ```
 
 ## API
 
 ### readTableAsJSON(input, options?)
 
-Synchronous. Blocks the calling thread while parsing — prefer
-`readTableAsJSONAsync` for large files, servers, or Electron UIs.
+Reads one worksheet and resolves to a JSON array with one object per data row.
+Parsing runs on the libuv thread pool, so the event loop (and any Electron UI)
+stays responsive. Invalid arguments throw synchronously; parse failures reject.
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `sheetName` | `string` | first sheet | Sheet to read |
-| `headerRow` | `number` | `0` | Header row index (0-based, non-negative) |
-| `skipRows` | `number[]` | `[]` | Row indices to skip (0-based) |
-| `headerMap` | `Record<string,string>` | `{}` | Rename headers in the output objects |
-| `inputEncoding` | `'base64'` | – | Force base64 interpretation of string input |
-| `maxRows` | `number` | `0` | Cap on rows read per sheet (0 = no cap); excess rows are truncated and reported via `warnings` |
-| `maxCols` | `number` | `0` | Cap on columns read per sheet (0 = no cap) |
-| `columns` | `string[]` | `[]` | Read only these columns: header texts (`"Amount"`) or Excel references (`"B"`, `"C:E"`); empty = all columns |
-| `includeImages` | `boolean` | `true` | `false` skips the whole image pipeline (no second archive pass, no media decompression) |
-| `includeWarnings` | `boolean` | `false` | Return `{ rows, warnings }` instead of the rows array |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `input` | `string \| Buffer` | **yes** | – | File path, workbook bytes, or base64 string |
+| `options` | `object` | no | `{}` | Options, see the table below |
 
-**Returns** `Array<Object>` — one plain object per data row, keyed by the
-header texts after `headerMap` is applied. Every value is a string; a cell
-holding a picture contains an `ImageDataObject` instead:
+**Options**
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `sheetName` | `string` | no | first sheet | Sheet to read |
+| `headerRow` | `number` | no | `0` | Header row index (0-based) |
+| `skipRows` | `number[]` | no | `[]` | Row indices to skip (0-based) |
+| `headerMap` | `object` | no | `{}` | Rename headers: `{ original: 'renamed' }` |
+| `inputEncoding` | `'base64'` | no | – | Force base64 interpretation of string input |
+| `maxRows` | `number` | no | `0` | Cap on rows (0 = no cap); truncation is reported via `warnings` |
+| `maxCols` | `number` | no | `0` | Cap on columns (0 = no cap) |
+| `columns` | `string[]` | no | `[]` | Read only these columns: header texts (`"Amount"`) or Excel references (`"B"`, `"C:E"`); unrequested columns are never read |
+| `engine` | `'xlnt' \| 'xml'` | no | `'xlnt'` | `'xml'` reads the sheet straight out of the package (much faster on projected/streamed reads); falls back automatically when a file needs the full model |
+| `values` | `'string' \| 'typed'` | no | `'string'` | `'typed'` returns numbers, booleans and `Date` objects instead of strings (requires `engine: 'xml'`) |
+| `includeImages` | `boolean` | no | `true` | `false` skips the whole image pipeline |
+| `includeWarnings` | `boolean` | no | `false` | Resolve to `{ rows, warnings }` instead of the rows array |
+| `onBatch` | `function` | no | – | Stream rows in batches; resolves to `{ rowCount, warnings }` instead |
+| `batchSize` | `number` | no | `50000` | Rows per batch when `onBatch` is used |
+
+**Returns** `Promise<Array<Object>>` — one object per data row, keyed by the
+header texts after `headerMap`. Every value is a `string`; a cell holding a
+picture contains an image object instead. With `values: 'typed'` the values are
+real numbers, booleans and `Date`s.
+
+**Example**
 
 ```javascript
-// data.xlsx: | name | age | photo |
-[
-  { name: 'Ada', age: '36', photo: { data: <Buffer ...>, name: 'image1.png', type: 'image/png' } },
-  { name: 'Alan', age: '41', photo: { data: <Buffer ...>, name: 'image2.png', type: 'image/png' } }
-]
+const rows = await readTableAsJSON('data.xlsx', { sheetName: 'Sheet1' });
+// => [ { name: 'Ada', age: '36' }, { name: 'Alan', age: '41' } ]
+
+// Typed values: amount is a number, when a Date
+const typed = await readTableAsJSON('big.xlsx', { engine: 'xml', values: 'typed' });
+
+// Stream a million rows with flat memory
+const { rowCount } = await readTableAsJSON('huge.xlsx', {
+  batchSize: 50000,
+  onBatch(batch, meta) { writeToDatabase(batch); }   // meta: { startIndex, count }
+});
 ```
-
-With `includeWarnings: true` the return value changes shape:
-
-```javascript
-{
-  rows: [ { name: 'Ada', age: '36' } ],
-  warnings: [ "Sheet 'Sheet1' truncated to 2 of 900 rows (maxRows)" ]
-}
-```
-
-When several images attach to one cell the value is an array of
-`ImageDataObject`. Cells outside the requested `columns` are not returned at
-all.
-
-### readTableAsJSONAsync(input, options?)
-
-Same options and result, returns a `Promise`. Parsing runs on the libuv thread
-pool, so the event loop (and any Electron UI) stays responsive.
 
 ### Image attachment rules
 
@@ -171,36 +173,93 @@ Every thrown error carries a machine-readable `code`:
 
 ## Writing
 
-### Create a workbook from JSON
+### writeTableAsJSON(rows, options?)
+
+Writes rows into a worksheet and resolves to the `.xlsx` bytes — or to a summary
+when `output` is given. Numbers stay numbers, booleans stay booleans and `Date`
+values become real Excel dates, so everything stays computable in Excel.
+
+With `sourceFile` (a path or a `Buffer` returned by any write call) the rows are
+**appended** to the named sheet — creating the sheet when it does not exist yet,
+which is how multi-sheet workbooks are built by chaining calls on the returned
+`Buffer`. With `append: false` the sheet's data is replaced instead; the rest of
+the workbook (other sheets, images, styles) is copied byte for byte either way.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `rows` | `Array \| Iterable \| AsyncIterable` | **yes** | – | Data rows: objects, arrays, or any (async) iterable such as a generator or database cursor |
+| `options` | `object` | no | `{}` | Options, see the table below |
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `sheetName` | `string` | no | `'Sheet1'` | Worksheet name; with `sourceFile`, the sheet to append to (created when missing) |
+| `sourceFile` | `string \| Buffer` | no | – | Workbook to write into: a path, or the `Buffer` from a previous write / update / render call |
+| `append` | `boolean` | no | `true` | Append after the sheet's last row; `false` replaces the sheet's data (only meaningful with `sourceFile`) |
+| `includeHeader` | `boolean` | no | `true`; with `sourceFile`: auto | Write a header row; "auto" writes it only when the sheet was created or had no rows, so chained appends never duplicate it |
+| `freezeHeader` | `boolean` | no | `false` | Freeze the header row (fresh sheets) |
+| `columns` | `object \| array` | no | from the first row | Column spec: `{ prop: { header, numberFormat, align, width } }` or `[{ key \| index, header, ... }]`. **Required** when `rows` is an iterable (it cannot be inferred) |
+| `output` | `string` | no | – | Write the file natively instead of returning a Buffer |
+| `compression` | `number` | no | `6` | 0 (store) .. 9 (maximum) |
+
+**Returns** `Promise<Buffer>` — the finished workbook; or
+`Promise<{ bytes, rowCount, sheetName }>` when `output` is given.
+
+**Example**
 
 ```javascript
-const { writeTableAsJSON, updateCells } = require('baja-lite-xlsx');
+// New workbook from rows: => Buffer
+const bytes = await writeTableAsJSON(rows, { sheetName: 'Data' });
 
-// => Buffer
-const bytes = writeTableAsJSON(rows, { sheetName: 'Data' });
-fs.writeFileSync('out.xlsx', bytes);
+// Append more rows to the same sheet (header is not duplicated), then add a
+// second sheet — multi-sheet workbooks by chaining on the returned Buffer:
+const more = await writeTableAsJSON(rows2, { sourceFile: bytes, sheetName: 'Data' });
+const multi = await writeTableAsJSON(summary, { sourceFile: more, sheetName: 'Summary' });
 
-// Or let the native layer write the file: => { bytes, rowCount, sheetName }
-writeTableAsJSON(rows, {
-  output: 'out.xlsx',
-  columns: { amount: { header: 'Amount', numberFormat: '#,##0.00', width: 14 } }
+// Replace a sheet's data instead of appending
+const replaced = await writeTableAsJSON(rows3, {
+  sourceFile: multi, sheetName: 'Data', append: false
+});
+
+// Stream from a database cursor with flat memory (columns are required)
+await writeTableAsJSON(fromDatabase(), {
+  sheetName: 'Report',
+  columns: { id: {}, name: {}, amount: { numberFormat: '#,##0.00' } },
+  output: 'report.xlsx'   // => { bytes, rowCount, sheetName }
 });
 ```
 
-Numbers stay numbers, booleans stay booleans and `Date` values become real Excel
-dates with an automatic date format, so everything stays computable in Excel
-instead of turning into text.
+### updateCells(options)
 
-### Write into an existing workbook
+Rewrites individual cells of an existing workbook. Only the affected worksheets
+are regenerated; every other part of the package is copied byte for byte, so
+untouched sheets, images and styles survive exactly as they were. A cell keeps
+its existing style unless the update supplies a `numberFormat`, formulas in a
+patched cell are dropped rather than left stale, and missing cells or rows are
+inserted in the right order.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `options` | `object` | **yes** | – | See the table below |
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `sourceFile` | `string \| Buffer` | **yes** | – | Workbook to patch: a path, or the `Buffer` from a previous write / update / render call |
+| `updates` | `array` | **yes** | – | `{ sheet?, cell, value?, numberFormat? }` entries; `cell` is an A1 reference (`"B7"`), `sheet` defaults to the first sheet, `value` may be a string, number, boolean, `Date` or `null` to clear |
+| `output` | `string` | no | – | Write the file natively instead of returning a Buffer |
+| `compression` | `number` | no | `6` | 0 (store) .. 9 (maximum) |
+
+**Returns** `Promise<Buffer>` — the patched workbook; or
+`Promise<{ bytes, cells }>` when `output` is given.
+
+**Example**
 
 ```javascript
-// Replace the target sheet's data and keep the rest of the workbook untouched:
-// other sheets, images, themes and styles are copied byte for byte.
-const buffer = writeTableAsJSON(rows, { template: 'template.xlsx' });
-
-// Rewrite individual cells: => Buffer, or { bytes, cells } when output is given
-const patched = updateCells({
-  template: 'book.xlsx',
+const patched = await updateCells({
+  sourceFile: 'book.xlsx',
   updates: [
     { cell: 'B7', value: 1234.5, numberFormat: '#,##0.00' },
     { cell: 'C7', value: 'text' },
@@ -209,122 +268,102 @@ const patched = updateCells({
 });
 ```
 
-`updateCells` patches the worksheet in place: a cell keeps its existing style
-unless the update supplies a `numberFormat`, formulas in a patched cell are
-dropped rather than left stale, and missing cells or rows are inserted in the
-right order. Everything not listed stays byte-identical.
+### renderTemplate(values, options?)
 
-### Templates
+Renders a template workbook: fills markers in cell text and resolves to the
+finished workbook. Repeated rows are copies of the template row's XML, so
+styles, number formats, row heights, merged cells and conditional formats
+survive untouched. Cells without markers, and every sheet without markers, are
+copied byte for byte. A marker may live in the cell itself or in
+`sharedStrings`, so templates authored in Excel work unchanged.
 
-```javascript
-const { renderTemplate } = require('baja-lite-xlsx');
+Two marker styles are understood, selected per sheet:
 
-// Template cells: "Report ${title}", "{{#each items}}" / "{{/each}}", "${name}"
-const buffer = renderTemplate(
-  { title: 'Q1', items: [{ name: 'a', amount: 1 }, { name: 'b', amount: 2 }] },
-  { template: 'report-template.xlsx' }
-);
-```
-
-Two markers are understood inside cell text:
+**1. ejsExcel syntax** — `<%...%>` markers evaluated as JavaScript. `_data_` is
+the values argument; when it is an array, `_data_[i]` is sheet *i*'s data
+(workbook order). Every sheet that contains markers is rendered.
 
 | Marker | Meaning |
 |--------|---------|
-| `${path}` | The value at `path` (`${user.name}`, `${items.0.amount}`). Resolved against the current `{{#each}}` item first, then from the root; `../name` steps out of a loop and `${@index}` is the 0-based loop index. |
-| `{{#each path}}` … `{{/each}}` | The rows between the markers repeat once per item of the array at `path`. |
+| `<%=expr%>` | Emit the expression's value as cell text |
+| `<%~expr%>` | Emit a number / `Date` so the cell's number format applies (dates become Excel serials) |
+| `<%#expr%>` | Dynamic formula: the expression evaluates to a formula string (`"=SUM(A1,A2)"`). Pair with `<%~result%>` to also store the pre-computed value — that is what keeps WPS from showing 0 until recalculation |
+| `<%forRow item,i in expr%>` | The row containing the marker repeats once per item of `expr`; the loop variables (`item`, `i`) are in scope for the whole row |
+| `<%forRBegin item,i in expr%>` … `<%forREnd%>` | The rows between the markers repeat per item |
+| `<%forCell key in expr%>` | The cell containing the marker repeats horizontally, once per item |
+| `<%ifCBegin cond%>` … `<%ifCEnd%>` | The rows in between are emitted only when `cond` is truthy |
+| `_row` / `_col` / `_rc` | Emitted row number (`12`), column letters (`F`), cell reference (`F12`) |
+| `_charPlus_(col, n)` / `_charToNum_(col)` | Column arithmetic: `"F"+3 → "I"`, `"F" → 6` |
+| `_mergeCellFn_(range)` | Merge cells, e.g. `_mergeCellFn_("C"+_row+":E"+_row)` |
+| `_outlineLevel_(n)` | Row grouping level on the emitted row |
+| `_dataValidation_({sqref, formula1})` | Dropdown validation for a cell range |
+| `_img_({imgPh, cellNumAdd, rowNumAdd})` | Insert an image anchored at the current cell. `imgPh` accepts an **http(s) URL, a `Buffer`, a base64 string, a data: URI or a file path**; the anchor spans `cellNumAdd` columns × `rowNumAdd` rows. Requires the template to already contain at least one picture (its drawing structure is extended) |
+| `_qrcode_({text, size, cellNumAdd, rowNumAdd})` | Insert a QR code for `text` (`npm install qrcode`) |
 
-Repeated rows are copies of the template row's XML, so styles, number formats,
-row heights, merged cells and conditional formats survive untouched. Only cells
-whose text contains a marker are rewritten; a cell keeps its style, and every
-sheet without markers is copied byte for byte.
+**2. Native markers** — rendered on the worker thread without JS evaluation:
 
-A marker may live in the cell itself or in `sharedStrings` — the way Excel
-stores cell text — so templates authored in Excel work unchanged.
+| Marker | Meaning |
+|--------|---------|
+| `${path}` | The value at `path` (`${user.name}`, `${items.0.amount}`). Resolved against the current `{{#each}}` item first; `../name` steps out of a loop, `${@index}` is the loop index. Unknown markers throw `TEMPLATE_ERROR` (`strict: false` writes an empty string) |
+| `{{#each path}}` … `{{/each}}` | The rows between the markers repeat once per item of the array at `path` |
 
-A row holding nothing but the marker delimits the block; a marker row that also
-carries data cells is the first repeated row. A marker with no matching value
-throws `TEMPLATE_ERROR` (pass `strict: false` to write an empty string instead),
-and an unclosed `{{#each}}` always throws.
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `values` | `object \| array` | **yes** | – | Marker values; with `<%...%>` also `_data_` (array = per-sheet data) |
+| `options` | `object` | **yes** | – | See the table below |
 
-#### Reusing a template: `cache: true`
+**Options**
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `template` | `string \| Buffer` | **yes** | – | Template workbook: a path, or bytes |
+| `sheetName` | `string` | no | all sheets | Render only this sheet |
+| `strict` | `boolean` | no | `true` | Native `${...}` markers only: throw on unknown markers instead of writing an empty string |
+| `cache` | `boolean` | no | `false` | Keep the parsed template structure in a bounded in-process cache (repeat renders skip reading and scanning the template; a rewritten template is detected automatically) |
+| `output` | `string` | no | – | Write the file instead of returning a Buffer |
+| `compression` | `number` | no | `6` | 0 (store) .. 9 (maximum) |
+
+**Returns** `Promise<Buffer>` — the rendered workbook; or
+`Promise<{ bytes, sheets }>` when `output` is given (`sheets` lists the
+rendered worksheet names).
+
+**Example**
 
 ```javascript
-// A report server rendering the same template over and over
-const filled = await renderTemplateAsync(values, { template, cache: true });
+// Template cells:  "报告 ${title}"                                (native marker)
+//                  "<%forRow it,i in _data_.items%>" / "<%=it.name%>" / "<%~it.qty%>"
+//                  "<%#\"=SUM(C2:C99)\"%><%~99%>"                  (formula + cached value)
+//                  "<%_img_({imgPh:\"https://cdn.example.com/logo.png\", cellNumAdd:3})%>"
+const buffer = await renderTemplate(
+  { title: 'Q1', items: [{ name: 'a', qty: 1 }, { name: 'b', qty: 2 }] },
+  { template: 'report-template.xlsx' }
+);
+
+// A report server rendering the same template over and over:
+const filled = await renderTemplate(values, { template, cache: true });
 ```
 
-The parsed template structure — row layout, marker positions and the shared
-string table — is kept in a bounded in-process cache (8 templates / 64 MB, LRU),
-so a repeat render skips reading and scanning the template altogether. Entries
-are keyed by the template's identity (its zip central directory: entry names,
-sizes and CRCs) plus the sheet filter, so a rewritten template is always picked
-up. Default: `false`.
+An unclosed `forRBegin` / `ifCBegin`, or an error inside a marker expression,
+throws `TEMPLATE_ERROR` naming the sheet and cell.
 
-### Asynchronous writes
+### Reading engine and typed values
 
-Every write has an async twin that resolves to the same value:
+By default (`engine: 'xlnt'`) the whole workbook is parsed into a model and the
+requested sheet is read from it. `engine: 'xml'` skips the model: the sheet is
+read straight out of the package — shared strings, the style table, the sheet
+XML — with projection, caps and header resolution applied while scanning. Both
+engines return exactly the same rows, and anything the direct reader does not
+model makes it fall back to `'xlnt'` automatically.
 
-```javascript
-const {
-  writeTableAsJSONAsync, updateCellsAsync, renderTemplateAsync
-} = require('baja-lite-xlsx');
-
-await writeTableAsJSONAsync(rows, { output: 'report.xlsx' }); // { bytes, rowCount, sheetName }
-const patched = await updateCellsAsync({ template, updates });
-const filled = await renderTemplateAsync(values, { template });
-```
-
-The rows / updates / values are copied into a compact native snapshot on the
-calling thread — the data lives in JS, so that step cannot move off it — and
-everything expensive (worksheet XML, deflate, package assembly, the file write)
-then runs on the libuv thread pool. A server or an Electron main process keeps
-serving requests while a large workbook is produced, and failures reject with
-the same `code` the synchronous call throws.
-
-### Streaming writes
-
-`rows` does not have to be an array. Any iterable — and any async iterable for
-the async call — is written batch by batch, which is what a database cursor, a
-generator or a file parser needs:
+With `values: 'typed'` (requires `engine: 'xml'`) the reader returns real
+JavaScript values instead of formatted strings:
 
 ```javascript
-const { writeTableAsJSONAsync } = require('baja-lite-xlsx');
-
-async function* fromDatabase() {
-  for await (const batch of cursor) yield* batch;
-}
-
-// => { bytes, rowCount, sheetName }
-await writeTableAsJSONAsync(fromDatabase(), {
-  sheetName: 'Report',
-  columns: { id: {}, name: {}, amount: { numberFormat: '#,##0.00' } },
-  output: 'report.xlsx'
+const rows = await readTableAsJSON('big.xlsx', {
+  engine: 'xml', values: 'typed', columns: ['amount', 'when']
 });
+// => [ { amount: 1200, when: Date 2026-01-15 }, ... ]
 ```
-
-Rows are folded into the same compact native snapshot the async path uses
-(16 bytes per cell, identical strings interned once), 20000 rows at a time, so
-peak memory is one batch plus that snapshot rather than the whole table as JS
-objects. The synchronous `writeTableAsJSON` accepts iterables too, but drains
-them on the calling thread. `options.columns` is required either way, because it
-cannot be inferred from a first row.
-
-### Reading engine: `engine: 'xml'`
-
-By default (`'xlnt'`) the whole workbook is parsed into a model and the requested
-sheet is read from it. `engine: 'xml'` skips the model: the sheet is read straight
-out of the package — shared strings, the style table, the sheet XML — with column
-projection, the caps and header resolution applied while scanning.
-
-```javascript
-const rows = readTableAsJSON('big.xlsx', { engine: 'xml', columns: ['Amount'] });
-```
-
-Both engines return exactly the same rows (dates, numbers, booleans, error text
-and shared strings are all formatted identically), and anything the direct reader
-does not model makes it fall back to `'xlnt'` for that file, so a read can never
-get worse. One exception: a streamed read (`onBatch`) with images enabled stays
-with `'xlnt'`, because streamed rows are handed over as they are produced.
 
 ## Performance
 
@@ -345,8 +384,8 @@ Practical guidance for large files:
 1. Pass `columns` when you only need a few of many columns.
 2. Pass `includeImages: false` when you only need values.
 3. Use `maxRows` / `maxCols` to bound a probe read.
-4. Use `readTableAsJSONAsync` in servers and Electron; several reads then run
-   in parallel on the libuv thread pool (`UV_THREADPOOL_SIZE` controls it).
+4. Reads already run on the libuv thread pool; several reads then run in
+   parallel (`UV_THREADPOOL_SIZE` controls it).
 5. Use `onBatch` + `batchSize` for sheets that should never be materialized.
 
 ### Streaming with `onBatch`

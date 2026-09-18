@@ -1,6 +1,8 @@
 const path = require('path');
 const fs = require('fs');
 
+const { renderEjsTemplate } = require('./lib/ejs-engine');
+
 // ---------------------------------------------------------------------------
 // Native addon loading
 // ---------------------------------------------------------------------------
@@ -129,6 +131,7 @@ function validateOptions(options) {
     includeImages = true,
     columns = [],
     engine = 'xlnt',
+    values,
     onBatch = null,
     batchSize = 50000,
     includeWarnings = false
@@ -180,6 +183,12 @@ function validateOptions(options) {
   if (engine !== 'xlnt' && engine !== 'xml') {
     throw makeError('INVALID_OPTIONS', 'options.engine must be "xlnt" or "xml"');
   }
+  if (values !== undefined && values !== 'string' && values !== 'typed') {
+    throw makeError('INVALID_OPTIONS', 'options.values must be "string" or "typed"');
+  }
+  if (values === 'typed' && engine !== 'xml') {
+    throw makeError('INVALID_OPTIONS', 'options.values "typed" requires options.engine "xml"');
+  }
 
   return {
     sheetName: sheetName === undefined ? null : sheetName,
@@ -191,6 +200,7 @@ function validateOptions(options) {
     includeImages,
     columns,
     engine,
+    values,
     onBatch,
     batchSize,
     includeWarnings
@@ -228,10 +238,14 @@ function transformToRows(nativeResult, opts) {
 
   // Cells arrive from the native layer as small integers: >= 0 indexes the
   // shared string pool, < 0 references an image (P1-1). Decoding here means
-  // repeated values all point at the same V8 string.
+  // repeated values all point at the same V8 string. With values: 'typed' the
+  // bridge already produced real numbers / booleans / Dates, so nothing to
+  // decode.
+  const typed = nativeResult.typed === true;
   const pool = nativeResult.strings || [];
   const images = nativeResult.images || [];
   const decode = (value) => {
+    if (typed) return value;
     if (typeof value === 'number') {
       return value < 0 ? images[-value - 1] : pool[value];
     }
@@ -283,6 +297,7 @@ function nativeOptions(opts, streaming) {
   const options = {
     sheetName: opts.sheetName === null ? undefined : opts.sheetName,
     engine: opts.engine,
+    values: opts.values,
     headerRow: opts.headerRow,
     maxRows: opts.maxRows,
     maxCols: opts.maxCols,
@@ -357,31 +372,16 @@ function createBatchHandler(opts) {
   };
 }
 
-function readStreamedSync(prepared, opts) {
+function readStreamed(prepared, opts) {
   const handler = createBatchHandler(opts);
   const options = nativeOptions(opts, true);
   const result = prepared.buffer
-    ? addon.readExcelBatched(prepared.buffer, options, handler.handleBatch)
-    : addon.readExcelBatched(prepared.filepath, options, handler.handleBatch);
-  return handler.finish(result.warnings);
-}
-
-async function readStreamedAsync(prepared, opts) {
-  const handler = createBatchHandler(opts);
-  const options = nativeOptions(opts, true);
-  const result = await (prepared.buffer
     ? addon.readExcelBatchedAsync(prepared.buffer, options, handler.handleBatch)
-    : addon.readExcelBatchedAsync(prepared.filepath, options, handler.handleBatch));
-  return handler.finish(result.warnings);
+    : addon.readExcelBatchedAsync(prepared.filepath, options, handler.handleBatch);
+  return result.then((r) => handler.finish(r.warnings));
 }
 
 function runNative(prepared, opts) {
-  return prepared.buffer
-    ? addon.readExcel(prepared.buffer, nativeOptions(opts))
-    : addon.readExcel(prepared.filepath, nativeOptions(opts));
-}
-
-function runNativeAsync(prepared, opts) {
   return prepared.buffer
     ? addon.readExcelAsync(prepared.buffer, nativeOptions(opts))
     : addon.readExcelAsync(prepared.filepath, nativeOptions(opts));
@@ -500,12 +500,13 @@ function validateWriteOptions(rows, options) {
 
   const {
     sheetName,
-    includeHeader = true,
+    includeHeader,
     freezeHeader = false,
     output,
     compression,
     columns,
-    template
+    sourceFile,
+    append = true
   } = options;
 
   if (isArray && rows.length === 0 && (columns === undefined || columns === null)) {
@@ -520,7 +521,7 @@ function validateWriteOptions(rows, options) {
   if (sheetName !== undefined && typeof sheetName !== 'string') {
     throw makeError('INVALID_OPTIONS', 'options.sheetName must be a string');
   }
-  if (typeof includeHeader !== 'boolean') {
+  if (includeHeader !== undefined && typeof includeHeader !== 'boolean') {
     throw makeError('INVALID_OPTIONS', 'options.includeHeader must be a boolean');
   }
   if (typeof freezeHeader !== 'boolean') {
@@ -529,22 +530,34 @@ function validateWriteOptions(rows, options) {
   if (output !== undefined && typeof output !== 'string') {
     throw makeError('INVALID_OPTIONS', 'options.output must be a file path');
   }
-  if (template !== undefined && template !== null &&
-      typeof template !== 'string' && !Buffer.isBuffer(template)) {
-    throw makeError('INVALID_OPTIONS', 'options.template must be a file path or a Buffer');
+  if (sourceFile !== undefined && sourceFile !== null &&
+      typeof sourceFile !== 'string' && !Buffer.isBuffer(sourceFile)) {
+    throw makeError('INVALID_OPTIONS', 'options.sourceFile must be a file path or a Buffer');
+  }
+  if (typeof append !== 'boolean') {
+    throw makeError('INVALID_OPTIONS', 'options.append must be a boolean');
   }
   validateCompression(compression);
 
+  // Header policy: a fresh workbook writes the header by default; appending to
+  // an existing sheet defaults to "auto" (header only when the sheet was
+  // created or is empty), so chained appends do not duplicate headers.
+  const headerMode = includeHeader === undefined
+    ? (sourceFile === undefined || sourceFile === null ? 'yes' : 'auto')
+    : (includeHeader ? 'yes' : 'no');
+
   return {
     sheetName,
-    includeHeader,
+    includeHeader: includeHeader === undefined ? true : includeHeader,
     freezeHeader,
     output: output === undefined ? undefined : path.resolve(output),
     compression,
     columns: normalizeWriteColumns(rows, columns),
-    template: Buffer.isBuffer(template) || template === undefined || template === null
-      ? template
-      : path.resolve(template)
+    sourceFile: Buffer.isBuffer(sourceFile) || sourceFile === undefined || sourceFile === null
+      ? sourceFile
+      : path.resolve(sourceFile),
+    append,
+    headerMode
   };
 }
 
@@ -556,25 +569,7 @@ function validateWriteOptions(rows, options) {
 
 const STREAM_CHUNK_ROWS = 20000;
 
-function writeStreamed(nativeOptions, iterable) {
-  const session = new addon.WriteSession(nativeOptions);
-  const iterator = iterable[Symbol.iterator]();
-
-  let batch = [];
-  for (let step = iterator.next(); !step.done; step = iterator.next()) {
-    batch.push(step.value);
-    if (batch.length >= STREAM_CHUNK_ROWS) {
-      session.append(batch);
-      batch = [];
-    }
-  }
-  if (batch.length > 0) {
-    session.append(batch);
-  }
-  return session.finishSync();
-}
-
-async function writeStreamedAsync(nativeOptions, iterable) {
+async function writeStreamed(nativeOptions, iterable) {
   const session = new addon.WriteSession(nativeOptions);
   const isAsync = typeof iterable[Symbol.asyncIterator] === 'function';
   const iterator = isAsync ? iterable[Symbol.asyncIterator]() : iterable[Symbol.iterator]();
@@ -599,46 +594,52 @@ async function writeStreamedAsync(nativeOptions, iterable) {
   return session.finish();
 }
 
+/**
+ * Writes a JSON array into a worksheet and resolves to the .xlsx bytes (or a
+ * summary when `options.output` is given).
+ *
+ * Numbers are written as numbers, booleans as booleans and `Date` objects as
+ * Excel dates, so the result stays computable in Excel instead of turning into
+ * text. With `options.sourceFile` (a path or a Buffer produced by any write
+ * call) the rows are APPENDED to the named sheet — creating the sheet when it
+ * does not exist yet, which is how multi-sheet workbooks are built by
+ * chaining calls on the returned Buffer.
+ *
+ * @param {Array<Object>|Array<Array>|Iterable<Object|Array>} rows - data rows.
+ *   An iterable (generator, database cursor, ...) is written batch by batch
+ *   instead of being materialized; `options.columns` is required in that case.
+ * @param {Object} [options]
+ * @param {string} [options.sheetName='Sheet1'] - worksheet name (with
+ *   sourceFile: the sheet to append to; a missing sheet is created).
+ * @param {string|Buffer} [options.sourceFile] - workbook to append to. A
+ *   Buffer may come from any write call's result.
+ * @param {boolean} [options.append=true] - false replaces the sheet's data
+ *   instead of appending after its last row.
+ * @param {boolean} [options.includeHeader] - write a header row. Default: yes
+ *   for a fresh workbook, auto (only on new/empty sheets) when appending.
+ * @param {boolean} [options.freezeHeader=false] - freeze the header row.
+ * @param {Object|Array} [options.columns] - column spec: `{ prop: { header,
+ *   numberFormat, align, width } }`, or an array of `{ key | index, header, ... }`.
+ * @param {string} [options.output] - write the file natively instead of
+ *   returning a Buffer; the result is then `{ bytes, rowCount, sheetName }`.
+ * @param {number} [options.compression] - 0 (store) .. 9 (max).
+ * @returns {Promise<Buffer|{bytes: number, rowCount: number, sheetName: string}>}
+ */
 function writeTableAsJSON(rows, options = {}) {
   const nativeOptions = validateWriteOptions(rows, options);
-  try {
-    if (Array.isArray(rows)) {
-      return addon.writeExcel(rows, nativeOptions);
+  return (async () => {
+    try {
+      if (Array.isArray(rows)) {
+        return await addon.writeExcelAsync(rows, nativeOptions);
+      }
+      return await writeStreamed(nativeOptions, rows);
+    } catch (err) {
+      if (!err.code) {
+        err.code = 'WRITE_FAILED';
+      }
+      throw err;
     }
-    return writeStreamed(nativeOptions, rows);
-  } catch (err) {
-    if (!err.code) {
-      err.code = 'WRITE_FAILED';
-    }
-    throw err;
-  }
-}
-
-/**
- * Asynchronous `writeTableAsJSON`. The rows are copied into a compact native
- * snapshot on the calling thread (that part cannot move: the data lives in JS)
- * and everything expensive — worksheet XML, deflate, package assembly and the
- * file write — then runs on the libuv thread pool, so the event loop keeps
- * serving requests while a large workbook is produced.
- *
- * Accepts the same arguments and resolves to the same Buffer / summary. Rows may
- * also be any iterable or async iterable (a generator, a database cursor, ...):
- * they are then folded into the snapshot batch by batch, so the table never has
- * to exist in JS at once.
- */
-async function writeTableAsJSONAsync(rows, options = {}) {
-  const nativeOptions = validateWriteOptions(rows, options);
-  try {
-    if (Array.isArray(rows)) {
-      return await addon.writeExcelAsync(rows, nativeOptions);
-    }
-    return await writeStreamedAsync(nativeOptions, rows);
-  } catch (err) {
-    if (!err.code) {
-      err.code = 'WRITE_FAILED';
-    }
-    throw err;
-  }
+  })();
 }
 
 function validateCompression(compression) {
@@ -649,7 +650,7 @@ function validateCompression(compression) {
 }
 
 /**
- * Rewrites individual cells of an existing workbook and returns the result.
+ * Rewrites individual cells of an existing workbook and resolves to the result.
  *
  * Only the affected worksheets are regenerated; every other part of the package
  * is copied byte for byte, so untouched sheets, images and styles survive
@@ -657,23 +658,24 @@ function validateCompression(compression) {
  * supplies a `numberFormat`.
  *
  * @param {Object} spec
- * @param {string|Buffer} spec.template - Workbook to patch.
+ * @param {string|Buffer} spec.sourceFile - Workbook to patch (path, or a Buffer
+ *   produced by any write call).
  * @param {Array<Object>} spec.updates - `{ sheet?, cell, value?, numberFormat? }`
  *   entries; `cell` is an A1 reference ("B7"), `sheet` defaults to the first.
  * @param {string} [spec.output] - Write the file natively instead of returning
  *   a Buffer; the result is then `{ bytes, cells }`.
  * @param {number} [spec.compression] - 0 (store) .. 9 (max).
- * @returns {Buffer|{bytes: number, cells: number}}
+ * @returns {Promise<Buffer|{bytes: number, cells: number}>}
  */
 function validateUpdateSpec(spec) {
   if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
     throw makeError('INVALID_OPTIONS', 'updateCells expects an options object');
   }
 
-  const { template, updates, output, compression } = spec;
+  const { sourceFile, updates, output, compression } = spec;
 
-  if (typeof template !== 'string' && !Buffer.isBuffer(template)) {
-    throw makeError('INVALID_OPTIONS', 'spec.template is required (file path or Buffer)');
+  if (typeof sourceFile !== 'string' && !Buffer.isBuffer(sourceFile)) {
+    throw makeError('INVALID_OPTIONS', 'spec.sourceFile is required (file path or Buffer)');
   }
   if (!Array.isArray(updates) || updates.length === 0) {
     throw makeError('INVALID_OPTIONS', 'spec.updates must be a non-empty array');
@@ -699,39 +701,29 @@ function validateUpdateSpec(spec) {
   validateCompression(compression);
 
   return {
-    template: Buffer.isBuffer(template) ? template : path.resolve(template),
+    sourceFile: Buffer.isBuffer(sourceFile) ? sourceFile : path.resolve(sourceFile),
     updates,
     output: output === undefined ? undefined : path.resolve(output),
     compression
   };
 }
 
-function updateCells(spec = {}) {
-  const nativeOptions = validateUpdateSpec(spec);
-  try {
-    return addon.writeCells(nativeOptions);
-  } catch (err) {
-    if (!err.code) {
-      err.code = 'WRITE_FAILED';
-    }
-    throw err;
-  }
-}
-
 /**
- * Asynchronous `updateCells`: the updates are snapshotted, then patching,
+ * Asynchronous cell patching: the updates are snapshotted, then patching,
  * compression and the file write run off the event loop.
  */
-async function updateCellsAsync(spec = {}) {
+function updateCells(spec = {}) {
   const nativeOptions = validateUpdateSpec(spec);
-  try {
-    return await addon.writeCellsAsync(nativeOptions);
-  } catch (err) {
-    if (!err.code) {
-      err.code = 'WRITE_FAILED';
+  return (async () => {
+    try {
+      return await addon.writeCellsAsync(nativeOptions);
+    } catch (err) {
+      if (!err.code) {
+        err.code = 'WRITE_FAILED';
+      }
+      throw err;
     }
-    throw err;
-  }
+  })();
 }
 
 // ---------------------------------------------------------------------------
@@ -809,35 +801,52 @@ function flattenTemplateValues(values) {
 /**
  * Renders a template workbook.
  *
- * Two markers are understood inside cell text:
+ * Two marker styles are understood inside cell text, selected per sheet:
  *
- * - `${path}` — replaces the marker with the value at `path`. Paths walk the
- *   same object the caller passes (`${user.name}`, `${items.0.amount}`), are
- *   relative to the current `{{#each}}` item first, and `../name` steps out of
- *   a loop. `${@index}` is the current 0-based loop index.
- * - `{{#each path}}` / `{{/each}}` — the rows between the two markers are
- *   repeated once per item of the array at `path`. The marker cells themselves
- *   disappear (and a row that only held markers is dropped).
+ * 1. ejsExcel syntax (`<%...%>`, evaluated as JavaScript — see the README for
+ *    the full reference):
+ *      <%=expr%>   emit the value as text
+ *      <%~expr%>   emit a number/Date so the cell's number format applies
+ *      <%#expr%>   dynamic formula ("=SUM(A1,A2)"); pair with <%~result%>
+ *                  to cache the computed value (keeps WPS from showing 0)
+ *      <%forRow item,i in _data_[1]%>       repeat the marker row per item
+ *      <%forRBegin ...%> ... <%forREnd%>    repeat the rows in between
+ *      <%forCell key in [...]%>             repeat the cell horizontally
+ *      <%ifCBegin cond%> ... <%ifCEnd%>     conditional region
+ *      _row / _col / _rc                    emitted row, column, cell ref
+ *      _charPlus_(col,n) / _charToNum_(col) column arithmetic
+ *      _mergeCellFn_(range)                 merge cells
+ *      _outlineLevel_(n)                    row grouping
+ *      _dataValidation_({sqref, formula1})  dropdown validation
+ *      _img_({imgPh, cellNumAdd, rowNumAdd}) image from URL/Buffer/base64
+ *      _qrcode_({text, size, ...})          QR code (needs `npm install qrcode`)
+ *    `_data_` is the values object; when it is an array, `_data_[i]` is sheet
+ *    i's data. Images require the template to contain at least one picture
+ *    (its drawing structure is extended), like the reference engine.
  *
- * Repeated rows are produced by copying the template row's XML, so formatting,
- * styles, row heights, merged cells and conditional formats survive untouched.
- * Cells are only rewritten when their text contains a marker; everything else,
- * including every other sheet, is copied byte for byte.
+ * 2. Native markers, rendered on the worker thread without JS evaluation:
+ *      ${path}   the value at `path`; `../name` steps out of a loop and
+ *                `${@index}` is the loop index
+ *      {{#each path}} ... {{/each}}   repeat the rows in between
  *
- * A `${...}` marker with no value throws `TEMPLATE_ERROR` (pass
- * `strict: false` to substitute an empty string instead), and an unclosed
- * `{{#each}}` always throws.
+ * Repeated rows are copies of the template row's XML, so styles, number
+ * formats, row heights, merges and conditional formats survive. Cells without
+ * markers and sheets without markers are copied byte for byte.
  *
- * @param {Object} values - Values to substitute; arrays drive `{{#each}}`.
+ * @param {Object|Array} values - Values to substitute; arrays drive loops and
+ *   with `<%...%>` also serve as `_data_`.
  * @param {Object} options
  * @param {string|Buffer} options.template - Template workbook.
- * @param {string} [options.sheetName] - Render only this sheet; by default every
- *   sheet that contains a marker is rendered.
- * @param {boolean} [options.strict=true] - Throw on unknown `${...}` markers.
- * @param {string} [options.output] - Write the file natively instead of
- *   returning a Buffer; the result is then `{ bytes, sheets }`.
+ * @param {string} [options.sheetName] - Render only this sheet; by default
+ *   every sheet that contains a marker is rendered.
+ * @param {boolean} [options.strict=true] - Native markers only: throw on
+ *   unknown `${...}` markers instead of substituting an empty string.
+ * @param {boolean} [options.cache=false] - Keep the parsed template structure
+ *   in a bounded in-process cache (renders of the same template get faster).
+ * @param {string} [options.output] - Write the file instead of returning a
+ *   Buffer; the result is then `{ bytes, sheets }`.
  * @param {number} [options.compression] - 0 (store) .. 9 (max).
- * @returns {Buffer|{bytes: number, sheets: string[]}}
+ * @returns {Promise<Buffer|{bytes: number, sheets: string[]}>}
  */
 function validateRenderSpec(values, options) {
   if (options === null || typeof options !== 'object' || Array.isArray(options)) {
@@ -865,7 +874,8 @@ function validateRenderSpec(values, options) {
 
   return {
     template: Buffer.isBuffer(template) ? template : path.resolve(template),
-    values: flattenTemplateValues(values),
+    values,
+    flatValues: flattenTemplateValues(values),
     options: {
       sheetName,
       strict,
@@ -876,33 +886,92 @@ function validateRenderSpec(values, options) {
   };
 }
 
-function renderTemplate(values, options = {}) {
-  const spec = validateRenderSpec(values, options);
-  try {
-    return addon.renderTemplate(spec.template, spec.values, spec.options);
-  } catch (err) {
-    if (!err.code) {
-      err.code = 'WRITE_FAILED';
+// Which engine a template needs: sheets whose text carries `<%` markers (stored
+// XML-escaped in the package) are evaluated in JS, everything else goes to the
+// native renderer. Memoized per template identity.
+const engineCache = new Map();
+
+async function detectTemplateEngine(template) {
+  let identity = null;
+  if (Buffer.isBuffer(template)) {
+    let hash = 2166136261;
+    for (const byte of template) {
+      hash = ((hash ^ byte) * 16777619) >>> 0;
     }
-    throw err;
+    identity = `bytes:${template.length}:${hash}`;
+  } else {
+    try {
+      const stat = fs.statSync(template);
+      identity = `path:${template}:${stat.size}:${stat.mtimeMs}`;
+    } catch (err) {
+      identity = `path:${template}`;
+    }
   }
+  const known = engineCache.get(identity);
+  if (known !== undefined) return known;
+
+  const parts = addon.readPackage(template);
+  const workbook = parts.parts.find((p) => p.name.replace(/\\/g, '/') === 'xl/workbook.xml');
+  const rels = parts.parts.find((p) => p.name.replace(/\\/g, '/') === 'xl/_rels/workbook.xml.rels');
+  let usesEjs = false;
+  if (workbook && rels) {
+    const sheets = renderEjsTemplateRefs(workbook.data.toString('utf8'), rels.data.toString('utf8'));
+    for (const sheet of sheets) {
+      const part = parts.parts.find((p) => p.name.replace(/\\/g, '/') === sheet.part);
+      if (part) {
+        const xml = part.data.toString('utf8');
+        if (xml.includes('<%') || xml.includes('&lt;%')) {
+          usesEjs = true;
+          break;
+        }
+      }
+    }
+  }
+  if (engineCache.size > 64) engineCache.clear();
+  engineCache.set(identity, usesEjs);
+  return usesEjs;
 }
 
-/**
- * Asynchronous `renderTemplate`: the values are flattened and snapshotted on the
- * calling thread, then the whole render (template walk, deflate, package
- * assembly, file write) runs on the libuv thread pool.
- */
-async function renderTemplateAsync(values, options = {}) {
-  const spec = validateRenderSpec(values, options);
-  try {
-    return await addon.renderTemplateAsync(spec.template, spec.values, spec.options);
-  } catch (err) {
-    if (!err.code) {
-      err.code = 'WRITE_FAILED';
-    }
-    throw err;
+// Thin re-export shim so index.js does not import engine internals twice.
+function renderEjsTemplateRefs(workbookXml, relsXml) {
+  const { parseSheets } = require('./lib/ejs-engine');
+  return parseSheets(workbookXml, relsXml);
+}
+
+const packageIO = {
+  async readParts(source) {
+    const result = addon.readPackage(source);
+    return result.parts.map((p) => ({ name: p.name, data: p.data }));
+  },
+  async build(parts, compression) {
+    return addon.buildPackage({ parts, compression });
   }
+};
+
+/**
+ * Renders a template workbook (asynchronous; see the doc block above).
+ */
+function renderTemplate(values, options = {}) {
+  const spec = validateRenderSpec(values, options);
+  return (async () => {
+    try {
+      if (await detectTemplateEngine(spec.template)) {
+        const { buffer, sheets } = await renderEjsTemplate(
+          spec.template, spec.values, spec.options, packageIO);
+        if (spec.options.output !== undefined) {
+          await fs.promises.writeFile(spec.options.output, buffer);
+          return { bytes: buffer.length, sheets };
+        }
+        return buffer;
+      }
+      return await addon.renderTemplateAsync(spec.template, spec.flatValues, spec.options);
+    } catch (err) {
+      if (!err.code) {
+        err.code = 'WRITE_FAILED';
+      }
+      throw err;
+    }
+  })();
 }
 
 // ---------------------------------------------------------------------------
@@ -932,37 +1001,37 @@ async function renderTemplateAsync(values, options = {}) {
  *   which contain { data: Buffer, name, type } (or an array of them).
  *   With includeWarnings: true it returns { rows, warnings } instead.
  */
-function readTableAsJSON(input, options = {}) {
-  if (input === null || input === undefined || input === '') {
-    throw makeError('INVALID_INPUT', 'Input is required (filepath, Buffer, or base64 string)');
-  }
-
-  const opts = validateOptions(options);
-  const prepared = prepareInput(input, options.inputEncoding);
-
-  try {
-    if (opts.onBatch) {
-      return readStreamedSync(prepared, opts);
-    }
-    const nativeResult = runNative(prepared, opts);
-    return transformToRows(nativeResult, opts);
-  } catch (err) {
-    if (!err.code) {
-      err.code = 'PARSE_ERROR';
-    }
-    throw err;
-  }
-}
-
 /**
- * Async variant of readTableAsJSON: parsing runs on the libuv thread pool
- * so the event loop (and any Electron UI) is not blocked.
+ * Reads an Excel table and resolves to a JSON array. Parsing runs on the libuv
+ * thread pool, so the event loop (and any Electron UI) is not blocked.
  *
- * @param {string|Buffer} input - See readTableAsJSON.
- * @param {Object} [options] - See readTableAsJSON.
+ * @param {string|Buffer} input - File path, Buffer, or base64 string
+ *   (when passing base64 explicitly, set options.inputEncoding = 'base64').
+ * @param {Object} [options]
+ * @param {string} [options.sheetName] - Sheet to read (default: first sheet).
+ * @param {number} [options.headerRow=0] - Header row index (0-based).
+ * @param {number[]} [options.skipRows=[]] - Row indices to skip (0-based).
+ * @param {Object<string,string>} [options.headerMap={}] - Header renames.
+ * @param {string} [options.inputEncoding] - Force input interpretation: 'base64'.
+ * @param {number} [options.maxRows=0] - Cap on rows read per sheet (0 = no cap).
+ * @param {number} [options.maxCols=0] - Cap on columns read per sheet (0 = no cap).
+ * @param {boolean} [options.includeImages=true] - false skips the whole image
+ *   pipeline (no second pass over the archive, no media decompression).
+ * @param {string[]} [options.columns=[]] - Read only these columns, given as
+ *   header texts ("Amount") or Excel references ("B", "C:E").
+ * @param {string} [options.engine='xlnt'] - 'xml' reads the sheet directly from
+ *   the package (several times faster for projected and streamed reads).
+ * @param {function} [options.onBatch] - Stream rows in batches of
+ *   options.batchSize instead of accumulating them.
+ * @param {boolean} [options.includeWarnings=false] - Return { rows, warnings }.
  * @returns {Promise<Array<Object>|{rows: Array<Object>, warnings: string[]}>}
+ *   One object per data row, keyed by the header texts (after headerMap). Cell
+ *   values are strings, except cells holding pictures, which contain
+ *   { data: Buffer, name, type } (or an array of them).
  */
-async function readTableAsJSONAsync(input, options = {}) {
+function readTableAsJSON(input, options = {}) {
+  // Validation happens synchronously (invalid arguments throw instead of
+  // rejecting), then the parse itself runs on the thread pool.
   if (input === null || input === undefined || input === '') {
     throw makeError('INVALID_INPUT', 'Input is required (filepath, Buffer, or base64 string)');
   }
@@ -970,36 +1039,25 @@ async function readTableAsJSONAsync(input, options = {}) {
   const opts = validateOptions(options);
   const prepared = prepareInput(input, options.inputEncoding);
 
-  if (opts.onBatch) {
+  return (async () => {
     try {
-      return await readStreamedAsync(prepared, opts);
+      if (opts.onBatch) {
+        return await readStreamed(prepared, opts);
+      }
+      const nativeResult = await runNative(prepared, opts);
+      return transformToRows(nativeResult, opts);
     } catch (err) {
       if (!err.code) {
         err.code = 'PARSE_ERROR';
       }
       throw err;
     }
-  }
-
-  let nativeResult;
-  try {
-    nativeResult = await runNativeAsync(prepared, opts);
-  } catch (err) {
-    if (!err.code) {
-      err.code = 'PARSE_ERROR';
-    }
-    throw err;
-  }
-  return transformToRows(nativeResult, opts);
+  })();
 }
 
 module.exports = {
   readTableAsJSON,
-  readTableAsJSONAsync,
   writeTableAsJSON,
-  writeTableAsJSONAsync,
   updateCells,
-  updateCellsAsync,
-  renderTemplate,
-  renderTemplateAsync
+  renderTemplate
 };
