@@ -593,25 +593,24 @@ bool readRowTexts(const std::string& sheetXml, size_t wanted, size_t colCap,
 }
 
 // One output row from the parsed texts: only the projected columns when a
-// projection is active, otherwise every column up to the cap.
-std::vector<CellValue> makeRow(const std::vector<std::string>& cells, bool projecting,
+// projection is active, otherwise every column up to the cap. The texts are
+// moved out, so a cell is never copied on its way to the output.
+std::vector<CellValue> makeRow(std::vector<std::string>& cells, bool projecting,
                                const std::vector<size_t>& projected, size_t colCap) {
     std::vector<CellValue> row;
     if (projecting) {
         row.reserve(projected.size());
         for (size_t column : projected) {
             CellValue value;
-            value.text = cells[column];
+            value.text = std::move(cells[column]);
             row.push_back(std::move(value));
         }
         return row;
     }
 
-    row.reserve(colCap);
+    row.resize(colCap);
     for (size_t column = 1; column <= colCap; ++column) {
-        CellValue value;
-        value.text = cells[column];
-        row.push_back(std::move(value));
+        row[column - 1].text = std::move(cells[column]);
     }
     return row;
 }
@@ -791,6 +790,8 @@ DirectReadStatus readSheetFromXml(const TemplateSource& source, const ReadOption
         if (!readRowCells(sheetXml, row, colCap, shared, styles, cells)) {
             return DirectReadStatus::Unsupported;
         }
+        // `cells` is consumed here, which is what keeps the full read from
+        // copying every cell text twice.
         stopped = !emitRow(makeRow(cells, needProjection, projected, colCap), streaming, sink,
                            effectiveBatch, batch, sheet);
     }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.1 (2026-09-18) — direct read, one copy per cell
+
+- The direct reader no longer copies every cell text on its way out (the per-row
+  buffer is consumed by move). That copy was what made a full, unprojected read
+  merely match the xlnt path; projected and streamed reads were already several
+  times faster and stay that way.
+
 ## 1.7.0 (2026-09-18) — direct sheet reading
 
 - New `engine: 'xml'` option for every read: the requested sheet is read straight
