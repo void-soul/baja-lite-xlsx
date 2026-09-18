@@ -225,6 +225,80 @@ test('bad includeImages -> INVALID_OPTIONS', 'sample', (fixture) => {
 });
 
 // ---------------------------------------------------------------------------
+// Read engine (P3): reading the sheet straight from the package must produce
+// exactly what the xlnt path produces
+// ---------------------------------------------------------------------------
+
+// Option sets that exercise the caps, projection and header handling.
+const ENGINE_OPTION_SETS = [
+  {},
+  { includeImages: false },
+  { maxRows: 3 },
+  { maxCols: 2 },
+  { maxRows: 3, maxCols: 2 },
+  { headerRow: 1 }
+];
+
+for (const [label, fixtureKey] of [['sample', 'sample'], ['sample2', 'sample2'], ['wps', 'wps']]) {
+  test(`engine xml matches xlnt on ${label}`, fixtureKey, (fixture) => {
+    for (const extra of ENGINE_OPTION_SETS) {
+      const viaXlnt = readTableAsJSON(fixture, { ...extra });
+      const viaXml = readTableAsJSON(fixture, { ...extra, engine: 'xml' });
+      assert.deepEqual(viaXml, viaXlnt, `options ${JSON.stringify(extra)}`);
+    }
+  });
+
+  test(`engine xml projection matches xlnt on ${label}`, fixtureKey, (fixture) => {
+    const probe = readTableAsJSON(fixture, { includeImages: false });
+    const keys = Object.keys(probe[0] || {});
+    if (keys.length === 0) return;
+
+    const requested = keys.length > 1 ? [keys[0], keys[keys.length - 1]] : [keys[0]];
+    const viaXlnt = readTableAsJSON(fixture, { columns: requested, includeImages: false });
+    const viaXml = readTableAsJSON(fixture, { columns: requested, includeImages: false, engine: 'xml' });
+    assert.deepEqual(viaXml, viaXlnt);
+  });
+}
+
+testAsync('engine xml streams the same rows as xlnt', 'sample', async (fixture) => {
+  const collect = async (engine) => {
+    const rows = [];
+    const summary = await readTableAsJSONAsync(fixture, {
+      engine,
+      includeImages: false,
+      batchSize: 2,
+      onBatch: (batch) => { rows.push(...batch); }
+    });
+    return { rows, rowCount: summary.rowCount };
+  };
+
+  const viaXlnt = await collect('xlnt');
+  const viaXml = await collect('xml');
+  assert.equal(viaXml.rowCount, viaXlnt.rowCount);
+  assert.deepEqual(viaXml.rows, viaXlnt.rows);
+});
+
+test('engine xml reports the same errors as xlnt', 'sample', (fixture) => {
+  // A missing sheet falls back to the xlnt path, which words the error.
+  assert.throws(
+    () => readTableAsJSON(fixture, { engine: 'xml', sheetName: '__NOPE__' }),
+    (err) => err.code === 'SHEET_NOT_FOUND'
+  );
+  // An unknown column is an options error, whichever engine reads the file.
+  assert.throws(
+    () => readTableAsJSON(fixture, { engine: 'xml', columns: ['__NO_SUCH_COLUMN__'] }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+test('bad engine -> INVALID_OPTIONS', 'sample', (fixture) => {
+  assert.throws(
+    () => readTableAsJSON(fixture, { engine: 'fast' }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Write: full sheet write (mode 1)
 // ---------------------------------------------------------------------------
 

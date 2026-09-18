@@ -23,6 +23,7 @@ All three return a `Buffer` when no `output` path is given, and a small
 | Template structure cache (`cache: true`) | 1.5.0 |
 | Write benchmarks (`bench/`) | 1.5.0 |
 | Streaming writes (iterable / async iterable rows) | 1.6.0 |
+| Direct sheet reading, `engine: 'xml'` (P3) | 1.7.0 |
 
 ## The two requirements: fast and accurate
 

@@ -1,6 +1,8 @@
 #ifndef XLSX_WRITER_H
 #define XLSX_WRITER_H
 
+#include "a1_reference.h"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -114,7 +116,7 @@ std::string buildStylesXml(const SheetStyles& styles);
 
 // Renders `<sheetData>` ... `</sheetData>`? Only the outer element is added by
 // the caller; the stream emits <row> elements.
-std::string columnLetters(size_t index);
+// columnLetters / parseA1Reference live in a1_reference.h.
 
 // Shared helpers (also used by the patching mode).
 std::string escapeXmlText(const std::string& text);
@@ -127,11 +129,6 @@ bool isValidSheetName(const std::string& name, std::string& reason);
 // Serializes one cell element (`<c ...>...</c>`); shared with the patcher.
 void appendCellXml(std::string& out, const std::string& columnLetters, size_t row,
                    const WriteCell& cell, size_t styleIndex);
-
-// Splits "AB12" into column 28 / row 12 / letters "AB". Returns false when the
-// reference is malformed. Shared by the patching and template modes.
-bool parseA1Reference(const std::string& reference, size_t& column, size_t& row,
-                      std::string& letters);
 
 } // namespace baja_xlsx
 

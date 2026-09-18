@@ -128,6 +128,7 @@ function validateOptions(options) {
     maxCols = 0,
     includeImages = true,
     columns = [],
+    engine = 'xlnt',
     onBatch = null,
     batchSize = 50000,
     includeWarnings = false
@@ -176,6 +177,9 @@ function validateOptions(options) {
       throw makeError('INVALID_OPTIONS', 'options.columns must contain non-empty strings');
     }
   }
+  if (engine !== 'xlnt' && engine !== 'xml') {
+    throw makeError('INVALID_OPTIONS', 'options.engine must be "xlnt" or "xml"');
+  }
 
   return {
     sheetName: sheetName === undefined ? null : sheetName,
@@ -186,6 +190,7 @@ function validateOptions(options) {
     maxCols,
     includeImages,
     columns,
+    engine,
     onBatch,
     batchSize,
     includeWarnings
@@ -277,6 +282,7 @@ function transformToRows(nativeResult, opts) {
 function nativeOptions(opts, streaming) {
   const options = {
     sheetName: opts.sheetName === null ? undefined : opts.sheetName,
+    engine: opts.engine,
     headerRow: opts.headerRow,
     maxRows: opts.maxRows,
     maxCols: opts.maxCols,

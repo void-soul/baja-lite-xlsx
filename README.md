@@ -309,6 +309,23 @@ objects. The synchronous `writeTableAsJSON` accepts iterables too, but drains
 them on the calling thread. `options.columns` is required either way, because it
 cannot be inferred from a first row.
 
+### Reading engine: `engine: 'xml'`
+
+By default (`'xlnt'`) the whole workbook is parsed into a model and the requested
+sheet is read from it. `engine: 'xml'` skips the model: the sheet is read straight
+out of the package — shared strings, the style table, the sheet XML — with column
+projection, the caps and header resolution applied while scanning.
+
+```javascript
+const rows = readTableAsJSON('big.xlsx', { engine: 'xml', columns: ['Amount'] });
+```
+
+Both engines return exactly the same rows (dates, numbers, booleans, error text
+and shared strings are all formatted identically), and anything the direct reader
+does not model makes it fall back to `'xlnt'` for that file, so a read can never
+get worse. One exception: a streamed read (`onBatch`) with images enabled stays
+with `'xlnt'`, because streamed rows are handed over as they are produced.
+
 ## Performance
 
 The reader only does work you asked for:

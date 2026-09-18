@@ -70,6 +70,19 @@ declare module 'baja-lite-xlsx' {
     columns?: string[];
 
     /**
+     * How the worksheet is read. `"xlnt"` (default) builds the workbook model
+     * and reads one sheet from it. `"xml"` reads the requested sheet straight
+     * out of the package — shared strings, the style table and the sheet XML,
+     * nothing else — which is markedly faster on large files.
+     *
+     * Both engines return exactly the same rows, and a file that uses something
+     * the direct reader does not model falls back to `"xlnt"` automatically. One
+     * exception: a streamed read (`onBatch`) with images enabled stays with
+     * `"xlnt"`, because streamed rows are handed over as they are produced.
+     */
+    engine?: 'xlnt' | 'xml';
+
+    /**
      * Stream rows in batches instead of returning them all: memory stays flat
      * no matter how large the sheet is. When set, the call resolves to
      * `{ rowCount, warnings }`.

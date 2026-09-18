@@ -191,42 +191,12 @@ std::string escapeXmlAttribute(const std::string& text) {
     return out;
 }
 
-std::string columnLetters(size_t index) {
-    std::string name;
-    while (index > 0) {
-        const size_t rem = (index - 1) % 26;
-        name.insert(name.begin(), static_cast<char>('A' + static_cast<int>(rem)));
-        index = (index - 1) / 26;
-    }
-    return name;
-}
+// columnLetters / parseA1Reference come from a1_reference.h (shared with the
+// readers and the patcher).
 
-bool parseA1Reference(const std::string& reference, size_t& column, size_t& row,
-                      std::string& letters) {
-    size_t i = 0;
-    letters.clear();
-    while (i < reference.size() && std::isalpha(static_cast<unsigned char>(reference[i]))) {
-        letters.push_back(static_cast<char>(
-            std::toupper(static_cast<unsigned char>(reference[i]))));
-        ++i;
-    }
-    if (letters.empty() || i >= reference.size()) return false;
-
-    size_t value = 0;
-    while (i < reference.size() && std::isdigit(static_cast<unsigned char>(reference[i]))) {
-        value = value * 10 + static_cast<size_t>(reference[i] - '0');
-        ++i;
-    }
-    if (value == 0 || i != reference.size()) return false;
-
-    column = 0;
-    for (char c : letters) {
-        column = column * 26 + static_cast<size_t>(c - 'A' + 1);
-    }
-    row = value;
-    return true;
-}
-
+// Differs from cell_format.cpp's formatDouble in one deliberate way: a cell
+// cannot hold a non-finite value, so this one falls back to "0" where the reader
+// side returns an empty string.
 std::string formatNumber(double value) {
     if (!std::isfinite(value)) {
         return "0";

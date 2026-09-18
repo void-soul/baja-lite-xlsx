@@ -287,6 +287,20 @@ await writeTableAsJSONAsync(fromDatabase(), {
 同步的 `writeTableAsJSON` 同样接受可迭代对象，只是在调用线程上排空。两种情况下
 都必须显式给出 `options.columns`（无法从首行推断）。
 
+### 读取引擎：`engine: 'xml'`
+
+默认（`'xlnt'`）会先把整个工作簿解析成模型，再从模型里读目标工作表。`engine: 'xml'`
+跳过模型：直接从压缩包里读目标工作表（共享字符串、样式表、工作表 XML），并在扫描过程
+中完成列投影、上限截断与表头解析。
+
+```javascript
+const rows = readTableAsJSON('big.xlsx', { engine: 'xml', columns: ['金额'] });
+```
+
+两个引擎返回的行**完全一致**（日期、数字、布尔、错误文本、共享字符串的呈现方式都相同）；
+一旦遇到直读器未建模的东西，会自动回退到 `'xlnt'` 读取该文件，因此读取结果不会变差。
+唯一例外：开启了图片的**流式读取**（`onBatch`）仍走 `'xlnt'`，因为流式行是边产出边交出的。
+
 ## 性能
 
 读取过程只做你要求的那部分工作：

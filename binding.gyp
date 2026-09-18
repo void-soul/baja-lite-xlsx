@@ -8,6 +8,9 @@
       "target_name": "baja_xlsx",
       "sources": [
         "src/addon.cpp",
+        "src/a1_reference.cpp",
+        "src/cell_format.cpp",
+        "src/sheet_xml_reader.cpp",
         "src/xlsx_reader.cpp",
         "src/xlsx_writer.cpp",
         "src/xlsx_patch.cpp",

@@ -379,6 +379,27 @@ bool parseReadOptions(const CallbackInfo& info, size_t index, ReadOptions& out) 
         }
     }
 
+    if (opts.Has("engine")) {
+        Value v = opts.Get("engine");
+        if (!v.IsUndefined() && !v.IsNull()) {
+            if (!v.IsString()) {
+                TypeError::New(env, "options.engine must be a string")
+                    .ThrowAsJavaScriptException();
+                return false;
+            }
+            const std::string engine = v.As<String>().Utf8Value();
+            if (engine == "xml") {
+                out.engine = ReadEngine::Xml;
+            } else if (engine == "xlnt") {
+                out.engine = ReadEngine::Xlnt;
+            } else {
+                TypeError::New(env, "options.engine must be \"xlnt\" or \"xml\"")
+                    .ThrowAsJavaScriptException();
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 

@@ -120,6 +120,13 @@ async function main() {
   results.push(await measure('sync buffered', () => readTableAsJSON(args.file), args.iterations));
   results.push(await measure('async buffered', () => readTableAsJSONAsync(args.file), args.iterations));
   results.push(await measure('includeImages: false', () => readTableAsJSON(args.file, { includeImages: false }), args.iterations));
+  // The direct XML reader (P3): same rows, without the workbook model.
+  results.push(await measure('engine: xml', () => readTableAsJSON(args.file, { engine: 'xml' }), args.iterations));
+  results.push(await measure(
+    'engine: xml, no images',
+    () => readTableAsJSON(args.file, { engine: 'xml', includeImages: false }),
+    args.iterations
+  ));
 
   let firstHeader = null;
   try {

@@ -1,6 +1,10 @@
 #include "xlsx_reader.h"
+#include "a1_reference.h"
+#include "cell_format.h"
 #include "image_extractor.h"
+#include "number_format.h"
 #include "path_util.h"
+#include "sheet_xml_reader.h"
 #include "zip_reader.h"
 #if defined(_WIN32)
 #include <filesystem>
@@ -20,78 +24,8 @@ namespace baja_xlsx {
 
 namespace {
 
-// Shortest round-trip formatting for doubles; replaces the previous
-// std::to_string(double) which forced 6 fixed decimals
-// (AUDIT-20260917-023).
-//
-// Deliberately NOT std::to_chars: libc++ marks the floating-point overload
-// as available only since macOS 13.3, so it breaks the 10.15 deployment
-// target. The precision loop picks the shortest representation (15..17
-// significant digits) that still parses back to the same value, which is
-// identical on every toolchain.
-std::string formatDouble(double v) {
-    if (!std::isfinite(v)) {
-        return std::string();
-    }
-    char buf[64];
-
-    // Fast path (P1-3): integral values are the common case in spreadsheets
-    // and need no round-trip precision probing.
-    if (v == std::floor(v) && std::fabs(v) < 1e15) {
-        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
-        return std::string(buf);
-    }
-
-    for (int precision = 15; precision <= 17; ++precision) {
-        std::snprintf(buf, sizeof(buf), "%.*g", precision, v);
-        if (std::strtod(buf, nullptr) == v) {
-            break;
-        }
-    }
-    return std::string(buf);
-}
-
-// Converts an Excel date serial (days since 1899-12-30) to a deterministic
-// string. Replaces xlnt's locale-affected cell.to_string() for dates
-// (AUDIT-20260917-031).
-std::string formatDateSerial(double serial) {
-    if (!std::isfinite(serial) || serial < 0) {
-        return std::string();
-    }
-    long long days = static_cast<long long>(std::floor(serial));
-    double frac = serial - static_cast<double>(days);
-    long long secs = static_cast<long long>(std::llround(frac * 86400.0));
-    if (secs >= 86400) {
-        secs -= 86400;
-        days += 1;
-    }
-
-    // Days since 1899-12-30 -> days since 1970-01-01 (Excel serial 25569).
-    long long z = days - 25569;
-    z += 719468; // Howard Hinnant's civil_from_days offset
-    long long era = (z >= 0 ? z : z - 146096) / 146097;
-    unsigned doe = static_cast<unsigned>(z - era * 146097);
-    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    long long y = static_cast<long long>(yoe) + era * 400;
-    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    unsigned mp = (5 * doy + 2) / 153;
-    unsigned d = doy - (153 * mp + 2) / 5 + 1;
-    unsigned m = (mp < 10) ? mp + 3 : mp - 9;
-    y += (m <= 2) ? 1 : 0;
-
-    unsigned hh = static_cast<unsigned>(secs / 3600);
-    unsigned mm = static_cast<unsigned>((secs % 3600) / 60);
-    unsigned ss = static_cast<unsigned>(secs % 60);
-
-    char buf[32];
-    if (hh || mm || ss) {
-        std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02u:%02u:%02u",
-                      y, m, d, hh, mm, ss);
-    } else {
-        std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u", y, m, d);
-    }
-    return std::string(buf);
-}
+// formatDouble / formatDateSerial / formatTimeOfDay live in cell_format.cpp,
+// shared with the direct XML reader so both produce identical text.
 
 inline std::string cellKey(size_t row, size_t col) {
     return std::to_string(row) + "\x1F" + std::to_string(col);
@@ -110,48 +44,6 @@ std::string numberFormatCode(const xlnt::cell& cell) {
     } catch (...) {
         return std::string();
     }
-}
-
-struct FormatTokens {
-    bool date = false; // y or d: the value is a date
-    bool time = false; // h or s: the value carries a time of day
-};
-
-// Scans a format code outside of quoted literals.
-FormatTokens scanFormatTokens(const std::string& code) {
-    FormatTokens tokens;
-    bool quoted = false;
-    for (size_t i = 0; i < code.size(); ++i) {
-        const char c = code[i];
-        if (c == '"') {
-            quoted = !quoted;
-            continue;
-        }
-        if (c == '\\' || c == '_' || c == '*') { // escaped literal character
-            ++i;
-            continue;
-        }
-        if (quoted) continue;
-
-        const char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (lower == 'y' || lower == 'd') tokens.date = true;
-        if (lower == 'h' || lower == 's') tokens.time = true;
-    }
-    return tokens;
-}
-
-// "HH:MM:SS" for the time-of-day part of an Excel serial.
-std::string formatTimeOfDay(double serial) {
-    if (!std::isfinite(serial) || serial < 0) {
-        return std::string();
-    }
-    const double fraction = serial - std::floor(serial);
-    long long secs = static_cast<long long>(std::llround(fraction * 86400.0));
-    if (secs >= 86400) secs -= 86400;
-    char buffer[16];
-    std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld",
-                  secs / 3600, (secs % 3600) / 60, secs % 60);
-    return std::string(buffer);
 }
 
 // xlnt only exposes the wide overload on MSVC; elsewhere the UTF-8 path is what
@@ -176,42 +68,8 @@ void trimInPlace(std::string& text) {
     text = text.substr(first, last - first + 1);
 }
 
-// "A" -> 1, "AB" -> 28, ... Returns false for anything that is not 1-3 letters.
-bool parseColumnLetters(const std::string& text, size_t& out) {
-    if (text.empty() || text.size() > 3) return false;
-    size_t value = 0;
-    for (char c : text) {
-        const unsigned char uc = static_cast<unsigned char>(c);
-        const char upper = static_cast<char>(std::toupper(uc));
-        if (upper < 'A' || upper > 'Z') return false;
-        value = value * 26 + static_cast<size_t>(upper - 'A' + 1);
-    }
-    out = value;
-    return value > 0;
-}
-
-// Accepts "A", "AB" and "C:E" style references.
-bool parseColumnReference(const std::string& text, size_t& first, size_t& last) {
-    const size_t colon = text.find(':');
-    if (colon == std::string::npos) {
-        if (!parseColumnLetters(text, first)) return false;
-        last = first;
-        return true;
-    }
-    return parseColumnLetters(text.substr(0, colon), first) &&
-           parseColumnLetters(text.substr(colon + 1), last) &&
-           first <= last;
-}
-
-std::string columnName(size_t index) {
-    std::string name;
-    while (index > 0) {
-        const size_t rem = (index - 1) % 26;
-        name.insert(name.begin(), static_cast<char>('A' + static_cast<int>(rem)));
-        index = (index - 1) / 26;
-    }
-    return name;
-}
+// parseColumnLetters / parseColumnReference / columnLetters live in
+// a1_reference.cpp, shared with every other module.
 
 } // namespace
 
@@ -430,7 +288,7 @@ std::vector<size_t> XlsxReader::resolveColumns(xlnt::worksheet ws,
         if (parseColumnReference(item, first, last)) {
             if (first > maxCol) {
                 warnings_.push_back("Column '" + raw + "' lies outside the sheet (last column is " +
-                                    columnName(maxCol) + "); skipped");
+                                    columnLetters(maxCol) + "); skipped");
                 continue;
             }
             for (size_t col = first; col <= std::min(last, maxCol); ++col) {
@@ -740,7 +598,13 @@ void XlsxReader::readImages(const std::string* filepath,
         // what lets streaming stay flat in memory (P2-1).
         for (const auto& pos : data.imagePositions) {
             if (pos.sheetName.empty()) continue;
-            if (!workbook_.contains(pos.sheetName)) {
+            // The workbook model is only loaded on the xlnt path; the direct path
+            // validates against the names read from the package.
+            const bool known =
+                loaded_ ? workbook_.contains(pos.sheetName)
+                        : std::find(directSheetNames_.begin(), directSheetNames_.end(),
+                                    pos.sheetName) != directSheetNames_.end();
+            if (!known) {
                 std::ostringstream oss;
                 oss << "Drawing anchor references unknown sheet '" << pos.sheetName << "'";
                 data.warnings.push_back(oss.str());
@@ -782,9 +646,81 @@ void XlsxReader::runPipeline(const std::string* filepath,
     readRequestedSheet(options, attach, sink, batchSize, data);
 }
 
+bool XlsxReader::readDirect(const std::string* filepath, const std::vector<uint8_t>* bytes,
+                            const ReadOptions& options, const RowBatchSink* sink, size_t batchSize,
+                            ExcelData& data) {
+    TemplateSource source;
+    if (filepath) {
+        source.path = filepath;
+    } else {
+        source.bytes = bytes;
+    }
+
+    // Streamed rows are handed over as they are produced, so images would have to
+    // be attached inside the scan; the xlnt path already does that, so an image
+    // read stays with it (see the note in README).
+    if (sink != nullptr && options.includeImages) {
+        return false;
+    }
+
+    std::string error;
+    if (!readSheetNames(source, directSheetNames_, error)) {
+        directSheetNames_.clear();
+        return false;
+    }
+
+    // Cell-level diagnostics come first, then the image pipeline appends its own.
+    warnings_.clear();
+
+    SheetData sheet;
+    std::vector<std::string> warnings;
+    const DirectReadStatus status =
+        readSheetFromXml(source, options, sheet, sink, batchSize, warnings, error);
+    if (status == DirectReadStatus::Unsupported) {
+        // Something in the package needs the full model: leave no trace behind.
+        data = ExcelData();
+        directSheetNames_.clear();
+        warnings_.clear();
+        return false;
+    }
+    if (status == DirectReadStatus::Failed) {
+        lastError_ = error;
+        return true;
+    }
+
+    warnings_.insert(warnings_.end(), warnings.begin(), warnings.end());
+    data.warnings = warnings_;
+
+    ImageAttachment attach;
+    readImages(filepath, bytes, options, data, attach);
+
+    // Images are attached per row, exactly like the xlnt path, so the streaming
+    // and buffered shapes stay identical.
+    if (attach.enabled) {
+        for (size_t r = 0; r < sheet.data.size(); ++r) {
+            attachRowImages(sheet.name, sheet.projectedColumns, r, sheet.data[r], attach);
+        }
+    }
+
+    if (sink == nullptr) {
+        data.sheets.push_back(std::move(sheet));
+    } else {
+        SheetData header;
+        header.name = sheet.name;
+        header.headers = sheet.headers;
+        header.projectedColumns = sheet.projectedColumns;
+        data.sheets.push_back(std::move(header));
+    }
+    return true;
+}
+
 ExcelData XlsxReader::readExcel(const std::string& filepath,
                                 const ReadOptions& options) {
     ExcelData data;
+    if (options.engine == ReadEngine::Xml &&
+        readDirect(&filepath, nullptr, options, nullptr, 0, data)) {
+        return data;
+    }
     try {
         if (!load(filepath)) {
             return data;
@@ -805,6 +741,10 @@ ExcelData XlsxReader::readExcel(const std::string& filepath,
 ExcelData XlsxReader::readExcel(const std::vector<uint8_t>& bytes,
                                 const ReadOptions& options) {
     ExcelData data;
+    if (options.engine == ReadEngine::Xml &&
+        readDirect(nullptr, &bytes, options, nullptr, 0, data)) {
+        return data;
+    }
     try {
         if (!load(bytes)) {
             return data;
@@ -825,6 +765,10 @@ ExcelData XlsxReader::readExcel(const std::vector<uint8_t>& bytes,
 void XlsxReader::readExcelStreamed(const std::string& filepath, const ReadOptions& options,
                                    const RowBatchSink& sink, size_t batchSize,
                                    ExcelData& data) {
+    if (options.engine == ReadEngine::Xml &&
+        readDirect(&filepath, nullptr, options, &sink, batchSize, data)) {
+        return;
+    }
     try {
         if (!load(filepath)) {
             return;
@@ -844,6 +788,10 @@ void XlsxReader::readExcelStreamed(const std::string& filepath, const ReadOption
 void XlsxReader::readExcelStreamed(const std::vector<uint8_t>& bytes, const ReadOptions& options,
                                    const RowBatchSink& sink, size_t batchSize,
                                    ExcelData& data) {
+    if (options.engine == ReadEngine::Xml &&
+        readDirect(nullptr, &bytes, options, &sink, batchSize, data)) {
+        return;
+    }
     try {
         if (!load(bytes)) {
             return;

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.7.0 (2026-09-18) — direct sheet reading
+
+- New `engine: 'xml'` option for every read: the requested sheet is read straight
+  out of the package (shared strings, style table, sheet XML) instead of building
+  the whole workbook model first. Column projection, `maxRows` / `maxCols` and
+  header resolution happen during the scan, and both buffered and streamed reads
+  are supported.
+- The direct reader produces exactly the same values as the xlnt path — same date
+  and time detection from the number format code, same number formatting, same
+  boolean and error text, same empty-cell and sparse-row handling. The test suite
+  now asserts this by comparing both engines over every fixture and option set.
+- Anything the direct reader does not model (ISO `t="d"` cells, out-of-order rows,
+  unknown cell types, shared string indices out of range) hands the file back to
+  the xlnt path, so a read can never get worse than before.
+- `bench/` gained `engine: xml` scenarios.
+- Internally: the number/date formatters and the A1 reference helpers moved into
+  shared modules (`cell_format`, `a1_reference`), and the read-side types into
+  `sheet_types.h`, so the direct reader carries no xlnt dependency.
+
 ## 1.6.0 (2026-09-18) — streaming writes
 
 - `writeTableAsJSON` and `writeTableAsJSONAsync` now accept any iterable as
