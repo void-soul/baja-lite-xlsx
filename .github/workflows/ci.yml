@@ -59,7 +59,16 @@ jobs:
       - name: Verify addon loads (reports missing DLLs)
         run: node -e "require('./build/Release/baja_xlsx.node'); console.log('addon loads OK')"
       - name: Test
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test > test-output.log 2>&1
+          status=$?
+          grep -E "^FAIL" test-output.log | head -20 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          tail -30 test-output.log
+          exit $status
       # Keeps the benchmark script working as the API grows (it covers the
       # write scenarios too); the numbers themselves are not asserted.
       - name: Benchmark smoke run

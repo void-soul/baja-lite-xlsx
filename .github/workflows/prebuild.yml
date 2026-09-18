@@ -84,7 +84,16 @@ jobs:
         run: node -e "require('./build/Release/baja_xlsx.node'); console.log('addon loads OK')"
 
       - name: Run tests
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test > test-output.log 2>&1
+          status=$?
+          grep -E "^FAIL" test-output.log | head -20 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          tail -30 test-output.log
+          exit $status
 
       - name: Verify prebuild archives
         run: node scripts/verify-prebuild.js prebuilds
