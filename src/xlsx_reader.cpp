@@ -97,6 +97,63 @@ inline std::string cellKey(size_t row, size_t col) {
     return std::to_string(row) + "\x1F" + std::to_string(col);
 }
 
+// xlnt decides "this cell is a date" from its number format, but only when its
+// own format parser recognises the code, and it never recognises a custom code
+// it has not seen before. Files written by other tools -- and by our writer's
+// custom formats -- then come back as raw serials. These helpers read the
+// format code directly instead, which also keeps dates readable in workbooks we
+// did not produce.
+std::string numberFormatCode(const xlnt::cell& cell) {
+    try {
+        if (!cell.has_format()) return std::string();
+        return cell.format().number_format().format_string();
+    } catch (...) {
+        return std::string();
+    }
+}
+
+struct FormatTokens {
+    bool date = false; // y or d: the value is a date
+    bool time = false; // h or s: the value carries a time of day
+};
+
+// Scans a format code outside of quoted literals.
+FormatTokens scanFormatTokens(const std::string& code) {
+    FormatTokens tokens;
+    bool quoted = false;
+    for (size_t i = 0; i < code.size(); ++i) {
+        const char c = code[i];
+        if (c == '"') {
+            quoted = !quoted;
+            continue;
+        }
+        if (c == '\\' || c == '_' || c == '*') { // escaped literal character
+            ++i;
+            continue;
+        }
+        if (quoted) continue;
+
+        const char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lower == 'y' || lower == 'd') tokens.date = true;
+        if (lower == 'h' || lower == 's') tokens.time = true;
+    }
+    return tokens;
+}
+
+// "HH:MM:SS" for the time-of-day part of an Excel serial.
+std::string formatTimeOfDay(double serial) {
+    if (!std::isfinite(serial) || serial < 0) {
+        return std::string();
+    }
+    const double fraction = serial - std::floor(serial);
+    long long secs = static_cast<long long>(std::llround(fraction * 86400.0));
+    if (secs >= 86400) secs -= 86400;
+    char buffer[16];
+    std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld",
+                  secs / 3600, (secs % 3600) / 60, secs % 60);
+    return std::string(buffer);
+}
+
 // xlnt only exposes the wide overload on MSVC; elsewhere the UTF-8 path is what
 // the narrow API already expects. Without this, a UTF-8 path on Windows is read
 // as ANSI and every non-ASCII file name fails to open.
@@ -266,8 +323,19 @@ std::string XlsxReader::cellToString(const xlnt::cell& cell) {
     }
     try {
         switch (cell.data_type()) {
-            case xlnt::cell_type::number:
-                return formatDouble(cell.value<double>());
+            case xlnt::cell_type::number: {
+                // Trust the format code rather than xlnt's classification, so
+                // dates survive a round trip through a custom format.
+                const FormatTokens tokens = scanFormatTokens(numberFormatCode(cell));
+                const double value = cell.value<double>();
+                if (tokens.date) {
+                    return formatDateSerial(value);
+                }
+                if (tokens.time) {
+                    return formatTimeOfDay(value);
+                }
+                return formatDouble(value);
+            }
             case xlnt::cell_type::boolean:
                 return cell.value<bool>() ? "true" : "false";
             case xlnt::cell_type::shared_string:
@@ -291,7 +359,13 @@ std::string XlsxReader::cellToString(const xlnt::cell& cell) {
                 return formula;
             }
             case xlnt::cell_type::date: {
-                std::string formatted = formatDateSerial(cell.value<double>());
+                const FormatTokens tokens = scanFormatTokens(numberFormatCode(cell));
+                const double value = cell.value<double>();
+                if (tokens.time && !tokens.date) {
+                    // A time-only format should not be rendered with a date.
+                    return formatTimeOfDay(value);
+                }
+                std::string formatted = formatDateSerial(value);
                 if (formatted.empty()) {
                     warnings_.push_back("Unsupported date value converted to empty string");
                 }
