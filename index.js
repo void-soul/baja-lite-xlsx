@@ -463,7 +463,10 @@ function normalizeWriteColumns(rows, columns) {
  * Excel dates, so the result stays computable in Excel instead of turning into
  * text.
  *
- * @param {Array<Object>|Array<Array>} rows - data rows.
+ * @param {Array<Object>|Array<Array>|Iterable<Object|Array>} rows - data rows.
+ *   An iterable (generator, database cursor, ...) is written batch by batch
+ *   instead of being materialized, which keeps a huge table out of JS memory;
+ *   `options.columns` is required in that case.
  * @param {Object} [options]
  * @param {string} [options.sheetName='Sheet1'] - worksheet name.
  * @param {boolean} [options.includeHeader=true] - write a header row.
@@ -476,8 +479,14 @@ function normalizeWriteColumns(rows, columns) {
  * @returns {Buffer|{bytes: number, rowCount: number, sheetName: string}}
  */
 function validateWriteOptions(rows, options) {
-  if (!Array.isArray(rows)) {
-    throw makeError('INVALID_OPTIONS', 'rows must be an array');
+  const isArray = Array.isArray(rows);
+  const isIterable = !isArray && rows !== null && typeof rows === 'object' &&
+    typeof rows[Symbol.iterator] === 'function';
+  const isAsyncIterable = !isArray && !isIterable && rows !== null && typeof rows === 'object' &&
+    typeof rows[Symbol.asyncIterator] === 'function';
+
+  if (!isArray && !isIterable && !isAsyncIterable) {
+    throw makeError('INVALID_OPTIONS', 'rows must be an array or an iterable of rows');
   }
   if (options === null || typeof options !== 'object' || Array.isArray(options)) {
     throw makeError('INVALID_OPTIONS', 'options must be an object');
@@ -493,8 +502,14 @@ function validateWriteOptions(rows, options) {
     template
   } = options;
 
-  if (rows.length === 0 && (columns === undefined || columns === null)) {
+  if (isArray && rows.length === 0 && (columns === undefined || columns === null)) {
     throw makeError('INVALID_OPTIONS', 'rows must not be empty unless options.columns is given');
+  }
+  if (!isArray && (columns === undefined || columns === null)) {
+    // Column names are normally inferred from the first row; an iterable cannot
+    // be peeked at without consuming it, so they have to be spelled out.
+    throw makeError('INVALID_OPTIONS',
+      'options.columns is required when rows are an iterable (it cannot be inferred)');
   }
   if (sheetName !== undefined && typeof sheetName !== 'string') {
     throw makeError('INVALID_OPTIONS', 'options.sheetName must be a string');
@@ -527,10 +542,64 @@ function validateWriteOptions(rows, options) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Streaming writes: the rows are folded into the native snapshot in batches, so
+// the whole table never exists in JS at once. Peak memory is one batch plus the
+// compact snapshot (16 bytes per cell, strings interned once).
+// ---------------------------------------------------------------------------
+
+const STREAM_CHUNK_ROWS = 20000;
+
+function writeStreamed(nativeOptions, iterable) {
+  const session = new addon.WriteSession(nativeOptions);
+  const iterator = iterable[Symbol.iterator]();
+
+  let batch = [];
+  for (let step = iterator.next(); !step.done; step = iterator.next()) {
+    batch.push(step.value);
+    if (batch.length >= STREAM_CHUNK_ROWS) {
+      session.append(batch);
+      batch = [];
+    }
+  }
+  if (batch.length > 0) {
+    session.append(batch);
+  }
+  return session.finishSync();
+}
+
+async function writeStreamedAsync(nativeOptions, iterable) {
+  const session = new addon.WriteSession(nativeOptions);
+  const isAsync = typeof iterable[Symbol.asyncIterator] === 'function';
+  const iterator = isAsync ? iterable[Symbol.asyncIterator]() : iterable[Symbol.iterator]();
+
+  let batch = [];
+  for (;;) {
+    const step = isAsync ? await iterator.next() : iterator.next();
+    if (step.done) break;
+
+    batch.push(step.value);
+    if (batch.length >= STREAM_CHUNK_ROWS) {
+      session.append(batch);
+      batch = [];
+      // Folding a batch is cheap; a long drain should not starve timers and
+      // sockets, so hand the loop a turn between batches.
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+  if (batch.length > 0) {
+    session.append(batch);
+  }
+  return session.finish();
+}
+
 function writeTableAsJSON(rows, options = {}) {
   const nativeOptions = validateWriteOptions(rows, options);
   try {
-    return addon.writeExcel(rows, nativeOptions);
+    if (Array.isArray(rows)) {
+      return addon.writeExcel(rows, nativeOptions);
+    }
+    return writeStreamed(nativeOptions, rows);
   } catch (err) {
     if (!err.code) {
       err.code = 'WRITE_FAILED';
@@ -546,12 +615,18 @@ function writeTableAsJSON(rows, options = {}) {
  * file write — then runs on the libuv thread pool, so the event loop keeps
  * serving requests while a large workbook is produced.
  *
- * Accepts the same arguments and resolves to the same Buffer / summary.
+ * Accepts the same arguments and resolves to the same Buffer / summary. Rows may
+ * also be any iterable or async iterable (a generator, a database cursor, ...):
+ * they are then folded into the snapshot batch by batch, so the table never has
+ * to exist in JS at once.
  */
 async function writeTableAsJSONAsync(rows, options = {}) {
   const nativeOptions = validateWriteOptions(rows, options);
   try {
-    return await addon.writeExcelAsync(rows, nativeOptions);
+    if (Array.isArray(rows)) {
+      return await addon.writeExcelAsync(rows, nativeOptions);
+    }
+    return await writeStreamedAsync(nativeOptions, rows);
   } catch (err) {
     if (!err.code) {
       err.code = 'WRITE_FAILED';

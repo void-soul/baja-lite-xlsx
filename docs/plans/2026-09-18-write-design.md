@@ -22,6 +22,7 @@ All three return a `Buffer` when no `output` path is given, and a small
 | Async twins for the write side | 1.4.0 |
 | Template structure cache (`cache: true`) | 1.5.0 |
 | Write benchmarks (`bench/`) | 1.5.0 |
+| Streaming writes (iterable / async iterable rows) | 1.6.0 |
 
 ## The two requirements: fast and accurate
 

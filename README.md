@@ -281,6 +281,34 @@ then runs on the libuv thread pool. A server or an Electron main process keeps
 serving requests while a large workbook is produced, and failures reject with
 the same `code` the synchronous call throws.
 
+### Streaming writes
+
+`rows` does not have to be an array. Any iterable — and any async iterable for
+the async call — is written batch by batch, which is what a database cursor, a
+generator or a file parser needs:
+
+```javascript
+const { writeTableAsJSONAsync } = require('baja-lite-xlsx');
+
+async function* fromDatabase() {
+  for await (const batch of cursor) yield* batch;
+}
+
+// => { bytes, rowCount, sheetName }
+await writeTableAsJSONAsync(fromDatabase(), {
+  sheetName: 'Report',
+  columns: { id: {}, name: {}, amount: { numberFormat: '#,##0.00' } },
+  output: 'report.xlsx'
+});
+```
+
+Rows are folded into the same compact native snapshot the async path uses
+(16 bytes per cell, identical strings interned once), 20000 rows at a time, so
+peak memory is one batch plus that snapshot rather than the whole table as JS
+objects. The synchronous `writeTableAsJSON` accepts iterables too, but drains
+them on the calling thread. `options.columns` is required either way, because it
+cannot be inferred from a first row.
+
 ## Performance
 
 The reader only does work you asked for:

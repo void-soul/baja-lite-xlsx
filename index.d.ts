@@ -211,11 +211,11 @@ declare module 'baja-lite-xlsx' {
    *   WRITE_FAILED / ADDON_LOAD_FAILED.
    */
   export function writeTableAsJSON(
-    rows: Array<Record<string, unknown>> | unknown[][],
+    rows: TableRows,
     options: WriteTableOptions & { output: string }
   ): WriteResult;
   export function writeTableAsJSON(
-    rows: Array<Record<string, unknown>> | unknown[][],
+    rows: TableRows,
     options?: WriteTableOptions
   ): Buffer;
 
@@ -226,13 +226,18 @@ declare module 'baja-lite-xlsx' {
    * and the file write — runs on the libuv thread pool. The event loop stays
    * free, so servers and Electron UIs keep responding while a large workbook is
    * produced. Same options, same result; failures reject with the same `code`.
+   *
+   * Rows may also be any iterable or async iterable (a generator, a database
+   * cursor, ...): they are folded into the snapshot batch by batch, so the table
+   * never has to exist in JS at once. `options.columns` is required then, since
+   * it cannot be inferred from a first row.
    */
   export function writeTableAsJSONAsync(
-    rows: Array<Record<string, unknown>> | unknown[][],
+    rows: AsyncTableRows,
     options: WriteTableOptions & { output: string }
   ): Promise<WriteResult>;
   export function writeTableAsJSONAsync(
-    rows: Array<Record<string, unknown>> | unknown[][],
+    rows: AsyncTableRows,
     options?: WriteTableOptions
   ): Promise<Buffer>;
 

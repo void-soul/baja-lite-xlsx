@@ -24,6 +24,10 @@ public:
     size_t rowCount() const override;
     bool nextRow(std::vector<WriteCell>& row) override;
 
+    // Rewinds the pull cursor, so the same snapshot can be written once and
+    // (after a failure, say) retried.
+    void reset() { cursor_ = 0; }
+
     size_t cellCount() const { return cells_.size(); }
     size_t uniqueStrings() const { return strings_.size(); }
     size_t memoryBytes() const;

@@ -262,6 +262,31 @@ const filled = await renderTemplateAsync(values, { template });
 执行。服务端或 Electron 主进程在生成大工作簿时仍能继续处理请求；失败时 reject 的
 错误码与同步调用抛出的完全一致。
 
+### 流式写入
+
+`rows` 不必是数组。任意可迭代对象（异步版本还支持异步可迭代对象）都会**分批**写入，
+这正是数据库游标、生成器、文件解析器需要的形态：
+
+```javascript
+const { writeTableAsJSONAsync } = require('baja-lite-xlsx');
+
+async function* fromDatabase() {
+  for await (const batch of cursor) yield* batch;
+}
+
+// => { bytes, rowCount, sheetName }
+await writeTableAsJSONAsync(fromDatabase(), {
+  sheetName: 'Report',
+  columns: { id: {}, name: {}, amount: { numberFormat: '#,##0.00' } },
+  output: 'report.xlsx'
+});
+```
+
+行会以每批 20000 行的粒度折进与异步路径相同的**紧凑原生快照**（每单元格 16 字节，
+重复字符串只存一份），因此峰值内存是"一批 + 快照"，而不是整张表的一堆 JS 对象。
+同步的 `writeTableAsJSON` 同样接受可迭代对象，只是在调用线程上排空。两种情况下
+都必须显式给出 `options.columns`（无法从首行推断）。
+
 ## 性能
 
 读取过程只做你要求的那部分工作：

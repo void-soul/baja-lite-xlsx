@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.6.0 (2026-09-18) — streaming writes
+
+- `writeTableAsJSON` and `writeTableAsJSONAsync` now accept any iterable as
+  `rows` (plus any async iterable for the async call). A table that comes from a
+  cursor, a generator or a parser therefore never has to exist in JS as a whole:
+  rows are folded into the native snapshot 20000 at a time and the package is
+  built once, at the end. Peak memory is one batch plus the compact snapshot
+  (16 bytes per cell, strings interned once) instead of the full table of JS
+  objects. `options.columns` is required for an iterable, since it cannot be
+  inferred from a first row.
+- The async drain hands the event loop a turn between batches, so a long stream
+  does not starve timers or sockets; the package is still assembled and written
+  on the thread pool.
+
 ## 1.5.0 (2026-09-18) — template cache, Excel-authored templates
 
 Fixed (both found by a new local harness that renders an Excel-style template,

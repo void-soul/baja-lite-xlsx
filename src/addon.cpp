@@ -881,29 +881,13 @@ private:
     uint32_t index_ = 0;
 };
 
-// Parses (rows, options) for a sheet write: the plan, how each column reads its
-// value, and the workbook to start from. Shared by the sync and async entry
-// points so both accept exactly the same options.
-bool readSheetWriteArguments(const CallbackInfo& info, WritePlan& plan,
-                             std::vector<ColumnSource>& columnSources,
-                             TemplateArgument& templateArg, Napi::Array& rows, Object& options) {
-    Env env = info.Env();
-
-    if (info.Length() < 1 || !info[0].IsArray()) {
-        TypeError::New(env, "First argument must be an array of rows")
-            .ThrowAsJavaScriptException();
-        return false;
-    }
-    if (info.Length() < 2 || !info[1].IsObject()) {
-        TypeError::New(env, "Second argument must be an options object")
-            .ThrowAsJavaScriptException();
-        return false;
-    }
-
-    rows = info[0].As<Napi::Array>();
-    options = info[1].As<Object>();
-
-    if (options.Has("sheetName")) {
+// Parses a sheet-write options object: the plan, how each column reads its
+// value, and the workbook to start from. Shared by every entry point (sync,
+// async and the streaming session) so they accept exactly the same options.
+bool readWriteSpec(Env env, const Object& options, WritePlan& plan,
+                   std::vector<ColumnSource>& columnSources, TemplateArgument& templateArg) {
+    const bool sheetNameGiven = options.Has("sheetName");
+    if (sheetNameGiven) {
         Value value = options.Get("sheetName");
         if (value.IsString()) {
             plan.sheetName = value.As<String>().Utf8Value();
@@ -975,12 +959,34 @@ bool readSheetWriteArguments(const CallbackInfo& info, WritePlan& plan,
         failWith(env, "INVALID_OPTIONS|options.template must be a file path or a Buffer");
         return false;
     }
-    if (!options.Has("sheetName")) {
+    if (!sheetNameGiven) {
         // A new workbook gets the default name; a template keeps its first sheet
         // unless the caller names one.
         plan.sheetName = templateArg.present ? std::string() : std::string("Sheet1");
     }
     return true;
+}
+
+// Parses (rows, options) for a one-shot sheet write.
+bool readSheetWriteArguments(const CallbackInfo& info, WritePlan& plan,
+                             std::vector<ColumnSource>& columnSources,
+                             TemplateArgument& templateArg, Napi::Array& rows, Object& options) {
+    Env env = info.Env();
+
+    if (info.Length() < 1 || !info[0].IsArray()) {
+        TypeError::New(env, "First argument must be an array of rows")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    if (info.Length() < 2 || !info[1].IsObject()) {
+        TypeError::New(env, "Second argument must be an options object")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+
+    rows = info[0].As<Napi::Array>();
+    options = info[1].As<Object>();
+    return readWriteSpec(env, options, plan, columnSources, templateArg);
 }
 
 // Copies the JS rows into the compact snapshot. This is the only part of an
@@ -1488,6 +1494,190 @@ Value RenderTemplateAsync(const CallbackInfo& info) {
 }
 
 // ---------------------------------------------------------------------------
+// Writing: streaming session. A caller that produces rows in batches -- a
+// database cursor, a generator, a file parser -- never has to hold the whole
+// table: each batch is folded into the same compact snapshot the async path
+// uses, and the package is assembled once, at the end. index.js drives this
+// whenever writeTableAsJSON / writeTableAsJSONAsync is given an iterable instead
+// of an array.
+// ---------------------------------------------------------------------------
+
+// Everything a session needs to outlive its JS object: the worker runs while the
+// wrapper may already be gone (GC), so it holds a shared_ptr to this.
+struct WriteSessionData {
+    WritePlan plan;
+    std::vector<ColumnSource> columns;
+    TemplateArgument templateArg;
+    WriteSnapshot snapshot;
+    size_t rowCount = 0;
+    bool finished = false;
+};
+
+bool buildSessionPackage(WriteSessionData& data, zipio::ZipWriter::Compression compression,
+                         std::vector<uint8_t>& out, std::string& error) {
+    data.snapshot.reset();
+    return data.templateArg.present
+        ? replaceSheetData(data.templateArg.source(), data.plan, data.snapshot, compression, out,
+                           error)
+        : writeNewWorkbook(data.plan, data.snapshot, compression, out, error);
+}
+
+class WriteSessionWorker : public Napi::AsyncWorker {
+public:
+    WriteSessionWorker(Napi::Env env, std::shared_ptr<WriteSessionData> data,
+                       zipio::ZipWriter::Compression compression, std::string outputPath)
+        : Napi::AsyncWorker(env),
+          deferred_(Napi::Promise::Deferred::New(env)),
+          data_(std::move(data)),
+          compression_(compression),
+          outputPath_(std::move(outputPath)) {}
+
+    Napi::Promise Promise() { return deferred_.Promise(); }
+
+    void Execute() override {
+        BAJA_WORKER_GUARD(
+            std::string error;
+            if (!buildSessionPackage(*data_, compression_, out_, error)) {
+                SetError(error.empty() ? "WRITE_FAILED|Failed to build the workbook" : error);
+                return;
+            }
+            if (!outputPath_.empty() && !writeBytesToFile(outputPath_, out_, error)) {
+                SetError(error);
+            }
+        )
+    }
+
+    void OnOK() override {
+        Napi::Env env = Env();
+        if (outputPath_.empty()) {
+            deferred_.Resolve(Buffer<uint8_t>::Copy(env, out_.data(), out_.size()));
+            return;
+        }
+        Object summary = Object::New(env);
+        summary.Set("bytes", Number::New(env, static_cast<double>(out_.size())));
+        summary.Set("rowCount", Number::New(env, static_cast<double>(data_->rowCount)));
+        summary.Set("sheetName", String::New(env, data_->plan.sheetName));
+        deferred_.Resolve(summary);
+    }
+
+    void OnError(const Napi::Error& e) override {
+        deferred_.Reject(makeCodedError(Env(), e.Message()).Value());
+    }
+
+private:
+    Napi::Promise::Deferred deferred_;
+    std::shared_ptr<WriteSessionData> data_;
+    zipio::ZipWriter::Compression compression_;
+    std::string outputPath_;
+    std::vector<uint8_t> out_;
+};
+
+class WriteSession : public Napi::ObjectWrap<WriteSession> {
+public:
+    // Declared here, defined after the class: inside the class body the base is
+    // still dependent, so DefineClass/InstanceMethod would not resolve.
+    //
+    // Napi::Env and Napi::Value are always spelled out in this class: the
+    // inherited Env() (ObjectWrap) and Value() (Reference<Object>) member
+    // functions hide those type names inside the class scope.
+    static void Register(Napi::Env env, Object exports);
+
+    explicit WriteSession(const CallbackInfo& info) : Napi::ObjectWrap<WriteSession>(info) {
+        Napi::Env env = info.Env();
+        if (info.Length() < 1 || !info[0].IsObject()) {
+            TypeError::New(env, "WriteSession expects an options object")
+                .ThrowAsJavaScriptException();
+            return;
+        }
+
+        Object options = info[0].As<Object>();
+        data_ = std::make_shared<WriteSessionData>();
+        if (!readWriteSpec(env, options, data_->plan, data_->columns, data_->templateArg)) {
+            data_.reset();
+            return;
+        }
+        compression_ = readCompression(options);
+        outputPath_ = readOutputPath(options);
+    }
+
+    // Folds one batch of rows into the snapshot. Main thread only: the rows are
+    // JS values, and this is the single place where a batch is copied.
+    Napi::Value Append(const CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        if (!data_ || data_->finished) {
+            return failWith(env, "WRITE_FAILED|This writer has already been finished");
+        }
+        if (info.Length() < 1 || !info[0].IsArray()) {
+            TypeError::New(env, "append expects an array of rows").ThrowAsJavaScriptException();
+            return env.Null();
+        }
+
+        const Napi::Array rows = info[0].As<Napi::Array>();
+        snapshotRows(env, rows, data_->columns, data_->snapshot);
+        if (hasPendingException(env)) {
+            return env.Null();
+        }
+        data_->rowCount += rows.Length();
+        return Number::New(env, static_cast<double>(data_->rowCount));
+    }
+
+    Napi::Value FinishSync(const CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        if (!data_ || data_->finished) {
+            return failWith(env, "WRITE_FAILED|This writer has already been finished");
+        }
+        data_->finished = true;
+
+        std::vector<uint8_t> out;
+        std::string error;
+        if (!buildSessionPackage(*data_, compression_, out, error)) {
+            return failWith(env,
+                            error.empty() ? "WRITE_FAILED|Failed to build the workbook" : error);
+        }
+        if (hasPendingException(env)) {
+            return env.Null();
+        }
+
+        Object summary = Object::New(env);
+        summary.Set("rowCount", Number::New(env, static_cast<double>(data_->rowCount)));
+        summary.Set("sheetName", String::New(env, data_->plan.sheetName));
+        return finishWrite(env, out, outputPath_, summary);
+    }
+
+    Napi::Value Finish(const CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        if (!data_ || data_->finished) {
+            return failWith(env, "WRITE_FAILED|This writer has already been finished");
+        }
+        data_->finished = true;
+
+        auto* worker = new WriteSessionWorker(env, data_, compression_, outputPath_);
+        const Napi::Promise promise = worker->Promise();
+        worker->Queue();
+        return promise;
+    }
+
+    Napi::Value RowCount(const CallbackInfo& info) {
+        return Number::New(info.Env(), data_ ? static_cast<double>(data_->rowCount) : 0);
+    }
+
+private:
+    std::shared_ptr<WriteSessionData> data_;
+    zipio::ZipWriter::Compression compression_ = zipio::ZipWriter::Compression::Default;
+    std::string outputPath_;
+};
+
+void WriteSession::Register(Napi::Env env, Object exports) {
+    Function constructor =
+        DefineClass(env, "WriteSession",
+                    {InstanceMethod("append", &WriteSession::Append),
+                     InstanceMethod("finish", &WriteSession::Finish),
+                     InstanceMethod("finishSync", &WriteSession::FinishSync),
+                     InstanceAccessor("rowCount", &WriteSession::RowCount, nullptr)});
+    exports.Set("WriteSession", constructor);
+}
+
+// ---------------------------------------------------------------------------
 // Init. The former native `extractImages` export is removed: it was a
 // placeholder that always returned [] silently (AUDIT-20260917-012).
 // ---------------------------------------------------------------------------
@@ -1503,6 +1693,9 @@ Object Init(Env env, Object exports) {
     exports.Set("writeExcelAsync", Function::New(env, WriteExcelAsync));
     exports.Set("writeCellsAsync", Function::New(env, WriteCellsAsync));
     exports.Set("renderTemplateAsync", Function::New(env, RenderTemplateAsync));
+    // Internal: index.js drives this when a sheet write is given an iterable
+    // instead of an array.
+    WriteSession::Register(env, exports);
     return exports;
 }
 

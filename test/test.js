@@ -733,6 +733,144 @@ testAsync('a large async write keeps the event loop running', null, async () => 
 });
 
 // ---------------------------------------------------------------------------
+// Streaming writes: rows may be any iterable, so the table never has to exist
+// in JS at once
+// ---------------------------------------------------------------------------
+
+const STREAM_COLUMNS = { id: {}, name: {}, amount: {}, when: { numberFormat: 'yyyy-mm-dd' } };
+
+function* rowGenerator(count) {
+  const when = new Date(2026, 0, 15);
+  for (let i = 0; i < count; i++) {
+    yield { id: i + 1, name: `row ${i + 1}`, amount: i * 1.25, when };
+  }
+}
+
+function collectRows(count) {
+  return Array.from(rowGenerator(count));
+}
+
+test('writeTableAsJSON accepts a generator', null, () => {
+  const rows = collectRows(50);
+  const fromArray = writeTableAsJSON(rows, { columns: STREAM_COLUMNS });
+  const fromGenerator = writeTableAsJSON(rowGenerator(50), { columns: STREAM_COLUMNS });
+
+  assert.equal(fromGenerator.length, fromArray.length);
+  assert.deepEqual(readTableAsJSON(fromGenerator), readTableAsJSON(fromArray));
+});
+
+test('a generator spanning several internal batches matches the array write', null, () => {
+  // More rows than one append batch, so the multi-batch path is exercised.
+  const count = 25000;
+  const rows = collectRows(count);
+
+  const fromArray = writeTableAsJSON(rows, { columns: STREAM_COLUMNS, sheetName: 'Big' });
+  const fromGenerator = writeTableAsJSON(rowGenerator(count), {
+    columns: STREAM_COLUMNS, sheetName: 'Big'
+  });
+
+  const expected = readTableAsJSON(fromArray);
+  assert.equal(expected.length, count);
+  assert.deepEqual(readTableAsJSON(fromGenerator), expected);
+});
+
+test('a generator can fill a template sheet', null, () => {
+  const template = makeTemplate([['old'], ['data']], [{}]);
+
+  const buffer = writeTableAsJSON(rowGenerator(3), {
+    template,
+    sheetName: 'Sheet1',
+    columns: [
+      { header: 'name', key: 'name' },
+      { header: 'amount', key: 'amount' }
+    ]
+  });
+  assert.ok(Buffer.isBuffer(buffer));
+
+  const rows = readTableAsJSON(buffer, { headerRow: 0 });
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows[0], { name: 'row 1', amount: '0' });
+  assert.deepEqual(rows[2], { name: 'row 3', amount: '2.5' });
+});
+
+test('iterable input requires explicit columns', null, () => {
+  assert.throws(
+    () => writeTableAsJSON(rowGenerator(1), {}),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+test('a non-iterable input is rejected', null, () => {
+  for (const bad of [42, 'rows', null, undefined, {}, new Date()]) {
+    assert.throws(
+      () => writeTableAsJSON(bad, { columns: STREAM_COLUMNS }),
+      (err) => err.code === 'INVALID_OPTIONS',
+      `expected ${String(bad)} to be rejected`
+    );
+  }
+});
+
+test('an error thrown by the generator propagates', null, () => {
+  function* broken() {
+    yield { id: 1, name: 'ok', amount: 1, when: null };
+    throw new Error('source exploded');
+  }
+  assert.throws(() => writeTableAsJSON(broken(), { columns: STREAM_COLUMNS }), /source exploded/);
+});
+
+testAsync('writeTableAsJSONAsync accepts a generator and an async iterable', null, async () => {
+  const rows = collectRows(30);
+  const expected = readTableAsJSON(
+    writeTableAsJSON(rows, { columns: STREAM_COLUMNS })
+  );
+
+  const fromGenerator = await writeTableAsJSONAsync(rowGenerator(30), {
+    columns: STREAM_COLUMNS
+  });
+  assert.deepEqual(readTableAsJSON(fromGenerator), expected);
+
+  async function* asyncRows() {
+    for (const row of rows) {
+      yield row;
+    }
+  }
+  const fromAsyncGenerator = await writeTableAsJSONAsync(asyncRows(), {
+    columns: STREAM_COLUMNS
+  });
+  assert.deepEqual(readTableAsJSON(fromAsyncGenerator), expected);
+});
+
+testAsync('streaming writes keep the event loop running', null, async () => {
+  let ticks = 0;
+  const timer = setInterval(() => { ticks += 1; }, 1);
+  try {
+    const buffer = await writeTableAsJSONAsync(rowGenerator(25000), {
+      columns: STREAM_COLUMNS,
+      sheetName: 'Streamed'
+    });
+    assert.ok(Buffer.isBuffer(buffer));
+  } finally {
+    clearInterval(timer);
+  }
+  assert.ok(ticks > 0, `expected timers to fire while streaming, got ${ticks}`);
+});
+
+testAsync('a streamed write reports its row count when writing to a file', null, async () => {
+  ensureOutputDir();
+  const target = path.join(outputDir, 'streamed.xlsx');
+  if (fs.existsSync(target)) fs.unlinkSync(target);
+
+  const summary = await writeTableAsJSONAsync(rowGenerator(100), {
+    columns: STREAM_COLUMNS,
+    output: target
+  });
+  assert.ok(fs.existsSync(target));
+  assert.equal(summary.rowCount, 100);
+  assert.equal(summary.sheetName, 'Sheet1');
+  assert.equal(readTableAsJSON(target).length, 100);
+});
+
+// ---------------------------------------------------------------------------
 // Streaming batches (P2-1)
 // ---------------------------------------------------------------------------
 
