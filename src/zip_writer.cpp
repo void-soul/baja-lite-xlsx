@@ -60,35 +60,29 @@ void ZipWriter::dosTimestamp(uint16_t& time, uint16_t& date) {
 
 bool ZipWriter::addEntry(const std::string& name, const std::string& data,
                          Compression compression, std::string& error) {
-    const size_t size = data.size();
     const uint8_t* raw = reinterpret_cast<const uint8_t*>(data.data());
-    const uint32_t crc = static_cast<uint32_t>(
-        crc32(0L, Z_NULL, 0));
-    const uint32_t checksum = size == 0
-        ? crc
-        : static_cast<uint32_t>(crc32(crc, reinterpret_cast<const Bytef*>(raw),
-                                      static_cast<uInt>(size)));
+    const size_t size = data.size();
+    const uint32_t checksum = static_cast<uint32_t>(crc32(
+        static_cast<uint32_t>(crc32(0L, Z_NULL, 0)),
+        reinterpret_cast<const Bytef*>(raw), static_cast<uInt>(size)));
 
-    if (compression == Compression::Store || size == 0) {
+    if (compression == Compression::Store) {
         return addRaw(name, raw, size, checksum, size, kMethodStore, error);
     }
 
-    uLongf bound = compressBound(static_cast<uLong>(size));
-    std::vector<uint8_t> compressed(bound);
-    const int rc = compress2(compressed.data(), &bound,
-                             reinterpret_cast<const Bytef*>(raw),
-                             static_cast<uLong>(size),
-                             compressionLevel(compression));
-    if (rc != Z_OK) {
-        error = "Failed to deflate '" + name + "'";
-        return false;
-    }
-    compressed.resize(bound);
-    if (compressed.size() >= size) {
-        return addRaw(name, raw, size, checksum, size, kMethodStore, error);
-    }
-    return addRaw(name, compressed.data(), compressed.size(), checksum, size,
-                  kMethodDeflate, error);
+    // Goes through the same raw-deflate path as the streamed entries: compress2()
+    // would emit a zlib-wrapped stream (header + Adler-32), which ZIP readers
+    // reject with ZIP_ER_ZLIB.
+    bool pending = true;
+    return addStreamedEntry(
+        name,
+        [&](std::string& chunk) -> bool {
+            if (!pending) return false;
+            chunk = data;
+            pending = false;
+            return true;
+        },
+        compression, error);
 }
 
 bool ZipWriter::addStreamedEntry(const std::string& name,

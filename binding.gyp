@@ -45,7 +45,7 @@
             "libraries": [
               "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/xlnt.lib",
               "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/zip.lib",
-              "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/zlib.lib"
+              "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/z.lib"
             ]
           }
         ],
