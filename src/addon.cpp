@@ -1,8 +1,12 @@
 #include <napi.h>
+#include "path_util.h"
 #include "xlsx_reader.h"
+#include "xlsx_writer.h"
 
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
+#include <ctime>
 #include <map>
 #include <mutex>
 #include <string>
@@ -695,6 +699,233 @@ Value ReadExcelBatchedAsync(const CallbackInfo& info) {
 }
 
 // ---------------------------------------------------------------------------
+// Writing: full sheet write. Cell values are pulled straight out of the JS
+// array while the worksheet XML is generated, so the data is never copied into
+// an intermediate representation.
+// ---------------------------------------------------------------------------
+
+struct ColumnSource {
+    bool byIndex = false;
+    std::string key;
+    uint32_t index = 0;
+};
+
+WriteCell toWriteCell(const Value& value) {
+    WriteCell cell;
+    if (value.IsEmpty() || value.IsUndefined() || value.IsNull()) {
+        return cell; // empty cell
+    }
+    if (value.IsNumber()) {
+        cell.kind = WriteCell::Kind::Number;
+        cell.number = value.As<Number>().DoubleValue();
+        return cell;
+    }
+    if (value.IsBoolean()) {
+        cell.kind = WriteCell::Kind::Boolean;
+        cell.boolean = value.As<Boolean>().Value();
+        return cell;
+    }
+    if (value.IsDate()) {
+        // Stored as an Excel serial in local time, with a date number format
+        // assigned by the writer: that is what makes it a real date in Excel
+        // instead of an uncomputable string.
+        const double millis = value.As<Date>().ValueOf();
+        const std::time_t seconds = static_cast<std::time_t>(std::floor(millis / 1000.0));
+        std::tm local{};
+#if defined(_WIN32)
+        localtime_s(&local, &seconds);
+#else
+        localtime_r(&seconds, &local);
+#endif
+        int millisPart = static_cast<int>(
+            std::llround(millis - static_cast<double>(seconds) * 1000.0));
+        if (millisPart < 0) millisPart = 0;
+        cell.kind = WriteCell::Kind::Number;
+        cell.isDate = true;
+        cell.number = toExcelSerial(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+                                    local.tm_hour, local.tm_min, local.tm_sec, millisPart);
+        return cell;
+    }
+    if (value.IsString()) {
+        cell.kind = WriteCell::Kind::Text;
+        cell.text = value.As<String>().Utf8Value();
+        return cell;
+    }
+    // Objects, arrays, functions: written as their string form rather than
+    // dropped silently.
+    cell.kind = WriteCell::Kind::Text;
+    cell.text = value.ToString().Utf8Value();
+    return cell;
+}
+
+class JsRowSource : public RowSource {
+public:
+    JsRowSource(Napi::Env env, Napi::Array rows, std::vector<ColumnSource> columns)
+        : env_(env), rows_(rows), columns_(std::move(columns)) {}
+
+    size_t rowCount() const override { return rows_.Length(); }
+
+    bool nextRow(std::vector<WriteCell>& row) override {
+        if (index_ >= rows_.Length()) {
+            return false;
+        }
+        const Value item = rows_.Get(index_++);
+        row.clear();
+        for (const ColumnSource& column : columns_) {
+            Value value = env_.Null();
+            if (item.IsObject()) {
+                Object object = item.As<Object>();
+                value = column.byIndex ? object.Get(column.index) : object.Get(column.key);
+            }
+            row.push_back(toWriteCell(value));
+        }
+        return true;
+    }
+
+private:
+    Napi::Env env_;
+    Napi::Array rows_;
+    std::vector<ColumnSource> columns_;
+    uint32_t index_ = 0;
+};
+
+Value WriteExcel(const CallbackInfo& info) {
+    Env env = info.Env();
+
+    if (info.Length() < 1 || !info[0].IsArray()) {
+        TypeError::New(env, "First argument must be an array of rows")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    if (info.Length() < 2 || !info[1].IsObject()) {
+        TypeError::New(env, "Second argument must be an options object")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    Napi::Array rows = info[0].As<Napi::Array>();
+    Object options = info[1].As<Object>();
+
+    WritePlan plan;
+    std::vector<ColumnSource> columnSources;
+    std::string outputPath;
+    zipio::ZipWriter::Compression compression = zipio::ZipWriter::Compression::Default;
+
+    if (options.Has("sheetName")) {
+        Value value = options.Get("sheetName");
+        if (value.IsString()) {
+            plan.sheetName = value.As<String>().Utf8Value();
+        }
+    }
+    if (options.Has("includeHeader")) {
+        Value value = options.Get("includeHeader");
+        if (value.IsBoolean()) {
+            plan.includeHeader = value.As<Boolean>().Value();
+        }
+    }
+    if (options.Has("freezeHeader")) {
+        Value value = options.Get("freezeHeader");
+        if (value.IsBoolean()) {
+            plan.freezeHeader = value.As<Boolean>().Value();
+        }
+    }
+    if (options.Has("output")) {
+        Value value = options.Get("output");
+        if (value.IsString()) {
+            outputPath = value.As<String>().Utf8Value();
+        }
+    }
+    if (options.Has("compression")) {
+        Value value = options.Get("compression");
+        if (value.IsNumber()) {
+            const int level = value.As<Number>().Int32Value();
+            compression = level <= 0 ? zipio::ZipWriter::Compression::Store
+                                     : (level <= 3 ? zipio::ZipWriter::Compression::Fast
+                                                   : zipio::ZipWriter::Compression::Default);
+        }
+    }
+    if (options.Has("columns")) {
+        Value value = options.Get("columns");
+        if (value.IsArray()) {
+            Napi::Array columns = value.As<Napi::Array>();
+            const uint32_t count = columns.Length();
+            for (uint32_t i = 0; i < count; ++i) {
+                Value item = columns.Get(i);
+                if (!item.IsObject()) continue;
+                Object column = item.As<Object>();
+
+                WriteColumn definition;
+                if (column.Has("header")) {
+                    Value header = column.Get("header");
+                    if (header.IsString()) definition.header = header.As<String>().Utf8Value();
+                }
+                if (column.Has("numberFormat")) {
+                    Value format = column.Get("numberFormat");
+                    if (format.IsString()) definition.numberFormat = format.As<String>().Utf8Value();
+                }
+                if (column.Has("align")) {
+                    Value align = column.Get("align");
+                    if (align.IsString()) definition.align = align.As<String>().Utf8Value();
+                }
+                if (column.Has("width")) {
+                    Value width = column.Get("width");
+                    if (width.IsNumber()) definition.width = width.As<Number>().DoubleValue();
+                }
+                plan.columns.push_back(std::move(definition));
+
+                ColumnSource source;
+                if (column.Has("index")) {
+                    Value index = column.Get("index");
+                    if (index.IsNumber()) {
+                        source.byIndex = true;
+                        source.index = index.As<Number>().Uint32Value();
+                    }
+                } else if (column.Has("key")) {
+                    Value key = column.Get("key");
+                    if (key.IsString()) {
+                        source.key = key.As<String>().Utf8Value();
+                    } else if (key.IsNumber()) {
+                        source.byIndex = true;
+                        source.index = key.As<Number>().Uint32Value();
+                    }
+                }
+                columnSources.push_back(std::move(source));
+            }
+        }
+    }
+
+    JsRowSource source(env, rows, std::move(columnSources));
+    std::vector<uint8_t> out;
+    std::string error;
+    if (!writeNewWorkbook(plan, source, compression, out, error)) {
+        return failWith(env, error.empty() ? "WRITE_FAILED|Failed to build the workbook" : error);
+    }
+    if (hasPendingException(env)) {
+        return env.Null();
+    }
+
+    if (!outputPath.empty()) {
+        std::FILE* file = pathutil::openForWrite(outputPath);
+        if (!file) {
+            return failWith(env, "FILE_WRITE_FAILED|Cannot create " + outputPath);
+        }
+        const size_t written = out.empty() ? 0 : std::fwrite(out.data(), 1, out.size(), file);
+        std::fclose(file);
+        if (written != out.size()) {
+            return failWith(env, "FILE_WRITE_FAILED|Failed to write " + outputPath);
+        }
+
+        Object result = Object::New(env);
+        result.Set("bytes", Number::New(env, static_cast<double>(out.size())));
+        result.Set("rowCount", Number::New(env, static_cast<double>(rows.Length())));
+        result.Set("sheetName", String::New(env, plan.sheetName));
+        return result;
+    }
+
+    return Buffer<uint8_t>::Copy(env, out.data(), out.size());
+}
+
+// ---------------------------------------------------------------------------
 // Init. The former native `extractImages` export is removed: it was a
 // placeholder that always returned [] silently (AUDIT-20260917-012).
 // ---------------------------------------------------------------------------
@@ -704,6 +935,7 @@ Object Init(Env env, Object exports) {
     exports.Set("readExcelAsync", Function::New(env, ReadExcelAsync));
     exports.Set("readExcelBatched", Function::New(env, ReadExcelBatched));
     exports.Set("readExcelBatchedAsync", Function::New(env, ReadExcelBatchedAsync));
+    exports.Set("writeExcel", Function::New(env, WriteExcel));
     return exports;
 }
 

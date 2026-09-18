@@ -145,4 +145,69 @@ declare module 'baja-lite-xlsx' {
     options: ReadTableOptions & { includeWarnings: true }
   ): Promise<ReadTableResult>;
   export function readTableAsJSONAsync(input: string | Buffer, options?: ReadTableOptions): Promise<ReadTableRow[]>;
+
+  /** Per-column configuration for `writeTableAsJSON`. */
+  export interface WriteColumnOptions {
+    /** Header text. Defaults to the source property name. */
+    header?: string;
+    /** Source property of each row object. */
+    key?: string | number;
+    /** Source index, for rows given as arrays. */
+    index?: number;
+    /** Number format, e.g. "#,##0.00", "0.00%", "yyyy-mm-dd". */
+    numberFormat?: string;
+    /** Horizontal alignment. */
+    align?: 'left' | 'center' | 'right';
+    /** Column width in characters. */
+    width?: number;
+  }
+
+  export interface WriteTableOptions {
+    /** Worksheet name. Default: "Sheet1". */
+    sheetName?: string;
+    /** Write a header row from the column headers. Default: true. */
+    includeHeader?: boolean;
+    /** Freeze the header row. Default: false. */
+    freezeHeader?: boolean;
+    /** Write the file natively instead of returning a Buffer. */
+    output?: string;
+    /** Compression level: 0 (store) .. 9 (maximum). Default: 6. */
+    compression?: number;
+    /**
+     * Column definition: either an object keyed by property name
+     * (`{ amount: { header: 'Amount', numberFormat: '#,##0.00' } }`) or an
+     * array of specs for array rows (`[{ index: 0, header: 'A' }]`).
+     * When omitted, columns come from the keys of the first row object.
+     */
+    columns?: Record<string, WriteColumnOptions> | WriteColumnOptions[];
+  }
+
+  /** Summary returned when `output` was written by the native layer. */
+  export interface WriteResult {
+    /** Size of the written package in bytes. */
+    bytes: number;
+    /** Data rows written (header excluded). */
+    rowCount: number;
+    /** Worksheet that received the data. */
+    sheetName: string;
+  }
+
+  /**
+   * Writes a JSON array into a worksheet and returns the .xlsx bytes.
+   *
+   * Numbers are written as numbers, booleans as booleans and `Date` objects as
+   * Excel dates with an automatic date format, so the values stay computable in
+   * Excel instead of becoming text.
+   *
+   * @throws Error with a `code` property: INVALID_OPTIONS / FILE_WRITE_FAILED /
+   *   WRITE_FAILED / ADDON_LOAD_FAILED.
+   */
+  export function writeTableAsJSON(
+    rows: Array<Record<string, unknown>> | unknown[][],
+    options: WriteTableOptions & { output: string }
+  ): WriteResult;
+  export function writeTableAsJSON(
+    rows: Array<Record<string, unknown>> | unknown[][],
+    options?: WriteTableOptions
+  ): Buffer;
 }

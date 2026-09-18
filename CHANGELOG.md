@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.1.0 (2026-09-18) — writing
+
+New: `writeTableAsJSON(rows, options)` — a JSON array becomes a worksheet.
+
+- Numbers are written as numbers, booleans as booleans and `Date` values as
+  Excel dates (serial + automatic date number format), so the result stays
+  computable in Excel instead of turning into text.
+- Columns are configured with `{ prop: { header, numberFormat, align, width } }`
+  (or an array of `{ key | index, ... }` for array rows); widths, number
+  formats and an optional frozen header are written directly into the sheet.
+- Output is a `Buffer`, or a `{ bytes, rowCount, sheetName }` summary when
+  `options.output` is given (written natively, no Buffer copy).
+- The package is assembled by a purpose-built ZIP writer: parts are deflated as
+  they are produced, so a large worksheet never exists in memory as
+  uncompressed XML, and the whole package is written exactly once.
+- Values are pulled straight out of the JS array while the XML is generated, so
+  the data is not copied into an intermediate representation.
+
+Fixed (this also fixes reading):
+
+- **Non-ASCII paths on Windows.** UTF-8 paths were handed to narrow file APIs,
+  which interpret them as ANSI, so any Chinese file or directory name failed to
+  open. All filesystem access now goes through `src/path_util.*`, which uses the
+  wide API on Windows (`std::filesystem::u8path` + `_wfopen` /
+  `zip_source_win32w_create`) and the UTF-8 path elsewhere.
+
 ## 1.0.21 (2026-09-18) — performance
 
 - `npm run bench [file] [--iterations N] [--batch N]`: reports best/median wall

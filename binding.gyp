@@ -9,8 +9,11 @@
       "sources": [
         "src/addon.cpp",
         "src/xlsx_reader.cpp",
+        "src/xlsx_writer.cpp",
         "src/image_extractor.cpp",
+        "src/path_util.cpp",
         "src/zip_reader.cpp",
+        "src/zip_writer.cpp",
         "src/xml_parsers.cpp"
       ],
       "include_dirs": [
@@ -41,7 +44,8 @@
             },
             "libraries": [
               "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/xlnt.lib",
-              "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/zip.lib"
+              "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/zip.lib",
+              "<(vcpkg_root)/installed/<(vcpkg_triplet)/lib/zlib.lib"
             ]
           }
         ],

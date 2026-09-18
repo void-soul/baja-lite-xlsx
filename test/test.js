@@ -12,7 +12,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const { readTableAsJSON, readTableAsJSONAsync } = require('..');
+const { readTableAsJSON, readTableAsJSONAsync, writeTableAsJSON } = require('..');
 
 const fixturesDir = path.join(__dirname, '..', 'examples');
 const FIXTURES = {
@@ -213,6 +213,93 @@ test('bad includeImages -> INVALID_OPTIONS', 'sample', (fixture) => {
     () => readTableAsJSON(fixture, { includeImages: 'no' }),
     (err) => err.code === 'INVALID_OPTIONS'
   );
+});
+
+// ---------------------------------------------------------------------------
+// Write: full sheet write (mode 1)
+// ---------------------------------------------------------------------------
+
+const outputDir = path.join(__dirname, 'output');
+
+function ensureOutputDir() {
+  fs.mkdirSync(outputDir, { recursive: true });
+}
+
+test('writeTableAsJSON returns a Buffer that reads back', null, () => {
+  const rows = [
+    { name: 'Ada', amount: 1200, active: true },
+    { name: 'Alan', amount: 980.5, active: false }
+  ];
+  const buffer = writeTableAsJSON(rows, { sheetName: 'Data' });
+  assert.ok(Buffer.isBuffer(buffer), 'expected a Buffer');
+  // Numbers stay numbers (no "1200.0"), booleans keep their Excel type.
+  assert.deepEqual(readTableAsJSON(buffer), [
+    { name: 'Ada', amount: '1200', active: 'true' },
+    { name: 'Alan', amount: '980.5', active: 'false' }
+  ]);
+});
+
+test('column config drives header text, order and number formats', null, () => {
+  const rows = [{ amount: 1234.5, name: 'Ada' }];
+  const buffer = writeTableAsJSON(rows, {
+    sheetName: '报表',
+    columns: {
+      name: { header: '姓名', width: 16 },
+      amount: { header: '金额', numberFormat: '#,##0.00' }
+    }
+  });
+
+  assert.deepEqual(readTableAsJSON(buffer), [{ 姓名: 'Ada', 金额: '1234.5' }]);
+  assert.equal(readTableAsJSON(buffer, { sheetName: '报表' }).length, 1);
+  assert.throws(
+    () => readTableAsJSON(buffer, { sheetName: 'nope' }),
+    (err) => err.code === 'SHEET_NOT_FOUND'
+  );
+});
+
+test('writeTableAsJSON writes to a file and reports bytes', null, () => {
+  ensureOutputDir();
+  const target = path.join(outputDir, 'write-basic.xlsx');
+  if (fs.existsSync(target)) fs.unlinkSync(target);
+
+  const summary = writeTableAsJSON([{ a: 1, b: 'x' }], { output: target });
+  assert.ok(fs.existsSync(target), 'output file must exist');
+  assert.ok(summary.bytes > 0);
+  assert.equal(summary.rowCount, 1);
+  assert.deepEqual(readTableAsJSON(target), [{ a: '1', b: 'x' }]);
+});
+
+test('array rows with an explicit column list', null, () => {
+  const buffer = writeTableAsJSON([[1, 'a'], [2, 'b']], {
+    columns: [{ header: 'num' }, { header: 'text' }]
+  });
+  assert.deepEqual(readTableAsJSON(buffer), [
+    { num: '1', text: 'a' },
+    { num: '2', text: 'b' }
+  ]);
+});
+
+test('includeHeader false leaves only data rows', null, () => {
+  const buffer = writeTableAsJSON([[1, 2], [3, 4]], {
+    columns: [{ header: 'A' }, { header: 'B' }],
+    includeHeader: false
+  });
+  // The reader consumes row 0 as its header, so one row must remain.
+  assert.equal(readTableAsJSON(buffer).length, 1);
+});
+
+test('Date values become real Excel dates', null, () => {
+  const buffer = writeTableAsJSON([{ when: new Date(2026, 0, 15) }], {
+    columns: { when: { header: 'when', numberFormat: 'yyyy-mm-dd' } }
+  });
+  assert.deepEqual(readTableAsJSON(buffer), [{ when: '2026-01-15' }]);
+});
+
+test('bad write specs -> INVALID_OPTIONS', null, () => {
+  assert.throws(() => writeTableAsJSON('nope', {}), (err) => err.code === 'INVALID_OPTIONS');
+  assert.throws(() => writeTableAsJSON([], {}), (err) => err.code === 'INVALID_OPTIONS');
+  assert.throws(() => writeTableAsJSON([{ a: 1 }], { columns: 5 }), (err) => err.code === 'INVALID_OPTIONS');
+  assert.throws(() => writeTableAsJSON([{ a: 1 }], { sheetName: 7 }), (err) => err.code === 'INVALID_OPTIONS');
 });
 
 // ---------------------------------------------------------------------------

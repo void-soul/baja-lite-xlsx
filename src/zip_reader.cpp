@@ -1,4 +1,5 @@
 #include "zip_reader.h"
+#include "path_util.h"
 #include "xml_parsers.h"
 #include <algorithm>
 #include <cstdio>
@@ -102,13 +103,10 @@ bool createSanitizedCopy(const std::string& source, std::string& outTempPath,
     }
 
     const std::string dest = makeTempWorkbookPath();
-    int createError = 0;
-    zip_t* out = zip_open(dest.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &createError);
+    std::string createError;
+    zip_t* out = pathutil::createZip(dest, createError);
     if (!out) {
-        zip_error_t ze;
-        zip_error_init_with_code(&ze, createError);
-        error = std::string("Failed to create sanitized copy: ") + zip_error_strerror(&ze);
-        zip_error_fini(&ze);
+        error = "Failed to create sanitized copy: " + createError;
         close(in);
         return false;
     }
@@ -200,7 +198,7 @@ bool createSanitizedCopy(const std::string& source, std::string& outTempPath,
         if (stripped == 0 && renamed == 0 && ok) {
             error = "No vendor-specific relationship types or entry names found";
         }
-        std::remove(dest.c_str());
+        pathutil::removeFile(dest);
         return false;
     }
 
@@ -303,17 +301,8 @@ bool writeTempWorkbook(const std::vector<uint8_t>& bytes, std::string& outPath,
 }
 
 zip_t* openReadOnly(const std::string& path, std::string& error) {
-    error.clear();
-    int errorp = 0;
-    zip_t* za = zip_open(path.c_str(), ZIP_RDONLY, &errorp);
-    if (!za) {
-        zip_error_t ziperr;
-        zip_error_init_with_code(&ziperr, errorp);
-        error = std::string("Failed to open XLSX file as ZIP: ") + zip_error_strerror(&ziperr);
-        zip_error_fini(&ziperr);
-        return nullptr;
-    }
-    return za;
+    // Goes through pathutil so non-ASCII paths work on Windows too.
+    return pathutil::openZipReadOnly(path, error);
 }
 
 bool readFile(zip_t* za, const std::string& filename,

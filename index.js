@@ -382,6 +382,156 @@ function runNativeAsync(prepared, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// Write: full sheet write
+// ---------------------------------------------------------------------------
+
+function copyColumnExtras(target, config, label) {
+  if (config.numberFormat !== undefined) {
+    if (typeof config.numberFormat !== 'string') {
+      throw makeError('INVALID_OPTIONS', `${label}.numberFormat must be a string`);
+    }
+    target.numberFormat = config.numberFormat;
+  }
+  if (config.align !== undefined) {
+    if (!['left', 'center', 'right'].includes(config.align)) {
+      throw makeError('INVALID_OPTIONS', `${label}.align must be "left", "center" or "right"`);
+    }
+    target.align = config.align;
+  }
+  if (config.width !== undefined) {
+    if (typeof config.width !== 'number' || !(config.width > 0)) {
+      throw makeError('INVALID_OPTIONS', `${label}.width must be a positive number`);
+    }
+    target.width = config.width;
+  }
+}
+
+/**
+ * Normalizes the many accepted `columns` shapes into the flat list of column
+ * specs the native writer expects.
+ * @private
+ */
+function normalizeWriteColumns(rows, columns) {
+  if (columns === undefined || columns === null) {
+    const first = rows[0];
+    if (Array.isArray(first)) {
+      throw makeError('INVALID_OPTIONS', 'options.columns is required when rows are arrays');
+    }
+    return Object.keys(first || {}).map((key) => ({ key, header: key }));
+  }
+
+  if (Array.isArray(columns)) {
+    return columns.map((column, i) => {
+      const label = `options.columns[${i}]`;
+      if (column === null || typeof column !== 'object' || Array.isArray(column)) {
+        throw makeError('INVALID_OPTIONS', `${label} must be an object`);
+      }
+      const spec = { header: typeof column.header === 'string' ? column.header : '' };
+      if (typeof column.key === 'string' || Number.isInteger(column.key)) {
+        spec.key = column.key;
+      } else if (Number.isInteger(column.index)) {
+        spec.index = column.index;
+      } else {
+        spec.index = i;
+      }
+      copyColumnExtras(spec, column, label);
+      return spec;
+    });
+  }
+
+  if (typeof columns === 'object') {
+    return Object.keys(columns).map((key) => {
+      const config = columns[key];
+      const label = `options.columns.${key}`;
+      if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+        throw makeError('INVALID_OPTIONS', `${label} must be an object`);
+      }
+      const spec = { key, header: typeof config.header === 'string' ? config.header : key };
+      copyColumnExtras(spec, config, label);
+      return spec;
+    });
+  }
+
+  throw makeError('INVALID_OPTIONS', 'options.columns must be an object or an array');
+}
+
+/**
+ * Writes a JSON array into a worksheet, returning the .xlsx bytes (or a
+ * summary when `options.output` is given).
+ *
+ * Numbers are written as numbers, booleans as booleans and `Date` objects as
+ * Excel dates, so the result stays computable in Excel instead of turning into
+ * text.
+ *
+ * @param {Array<Object>|Array<Array>} rows - data rows.
+ * @param {Object} [options]
+ * @param {string} [options.sheetName='Sheet1'] - worksheet name.
+ * @param {boolean} [options.includeHeader=true] - write a header row.
+ * @param {boolean} [options.freezeHeader=false] - freeze the header row.
+ * @param {Object|Array} [options.columns] - column spec: `{ prop: { header,
+ *   numberFormat, align, width } }`, or an array of `{ key | index, header, ... }`.
+ * @param {string} [options.output] - write the file natively instead of
+ *   returning a Buffer; the result is then `{ bytes, rowCount, sheetName }`.
+ * @param {number} [options.compression] - 0 (store) .. 9 (max).
+ * @returns {Buffer|{bytes: number, rowCount: number, sheetName: string}}
+ */
+function writeTableAsJSON(rows, options = {}) {
+  if (!Array.isArray(rows)) {
+    throw makeError('INVALID_OPTIONS', 'rows must be an array');
+  }
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw makeError('INVALID_OPTIONS', 'options must be an object');
+  }
+
+  const {
+    sheetName,
+    includeHeader = true,
+    freezeHeader = false,
+    output,
+    compression,
+    columns
+  } = options;
+
+  if (rows.length === 0 && (columns === undefined || columns === null)) {
+    throw makeError('INVALID_OPTIONS', 'rows must not be empty unless options.columns is given');
+  }
+  if (sheetName !== undefined && typeof sheetName !== 'string') {
+    throw makeError('INVALID_OPTIONS', 'options.sheetName must be a string');
+  }
+  if (typeof includeHeader !== 'boolean') {
+    throw makeError('INVALID_OPTIONS', 'options.includeHeader must be a boolean');
+  }
+  if (typeof freezeHeader !== 'boolean') {
+    throw makeError('INVALID_OPTIONS', 'options.freezeHeader must be a boolean');
+  }
+  if (output !== undefined && typeof output !== 'string') {
+    throw makeError('INVALID_OPTIONS', 'options.output must be a file path');
+  }
+  if (compression !== undefined &&
+      (!Number.isInteger(compression) || compression < 0 || compression > 9)) {
+    throw makeError('INVALID_OPTIONS', 'options.compression must be an integer between 0 and 9');
+  }
+
+  const specs = normalizeWriteColumns(rows, columns);
+
+  try {
+    return addon.writeExcel(rows, {
+      sheetName,
+      includeHeader,
+      freezeHeader,
+      output: output === undefined ? undefined : path.resolve(output),
+      compression,
+      columns: specs
+    });
+  } catch (err) {
+    if (!err.code) {
+      err.code = 'WRITE_FAILED';
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -471,5 +621,6 @@ async function readTableAsJSONAsync(input, options = {}) {
 
 module.exports = {
   readTableAsJSON,
-  readTableAsJSONAsync
+  readTableAsJSONAsync,
+  writeTableAsJSON
 };

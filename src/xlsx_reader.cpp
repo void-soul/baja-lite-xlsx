@@ -1,6 +1,10 @@
 #include "xlsx_reader.h"
 #include "image_extractor.h"
+#include "path_util.h"
 #include "zip_reader.h"
+#if defined(_WIN32)
+#include <filesystem>
+#endif
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -93,6 +97,17 @@ inline std::string cellKey(size_t row, size_t col) {
     return std::to_string(row) + "\x1F" + std::to_string(col);
 }
 
+// xlnt only exposes the wide overload on MSVC; elsewhere the UTF-8 path is what
+// the narrow API already expects. Without this, a UTF-8 path on Windows is read
+// as ANSI and every non-ASCII file name fails to open.
+void loadWorkbookFromPath(xlnt::workbook& workbook, const std::string& utf8Path) {
+#if defined(_WIN32)
+    workbook.load(std::filesystem::u8path(utf8Path).wstring());
+#else
+    workbook.load(utf8Path);
+#endif
+}
+
 void trimInPlace(std::string& text) {
     const char* kSpace = " \t\r\n";
     const size_t first = text.find_first_not_of(kSpace);
@@ -153,7 +168,7 @@ bool XlsxReader::load(const std::string& filepath) {
     std::string firstError;
     bool firstOk = false;
     try {
-        workbook_.load(filepath);
+        loadWorkbookFromPath(workbook_, filepath);
         firstOk = true;
     } catch (const std::exception& e) {
         firstError = e.what();
@@ -180,14 +195,14 @@ bool XlsxReader::load(const std::string& filepath) {
     if (zipio::createSanitizedCopy(filepath, tempPath, sanitizeError)) {
         bool retryOk = false;
         try {
-            workbook_.load(tempPath);
+            loadWorkbookFromPath(workbook_, tempPath);
             retryOk = true;
         } catch (const std::exception& secondError) {
             retryNote = std::string("sanitized copy still rejected: ") + secondError.what();
         } catch (...) {
             retryNote = "sanitized copy still rejected (unknown non-std exception)";
         }
-        std::remove(tempPath.c_str());
+        pathutil::removeFile(tempPath);
         if (retryOk) {
             loaded_ = true;
             lastError_.clear();
@@ -235,7 +250,7 @@ bool XlsxReader::load(const std::vector<uint8_t>& bytes) {
     std::string stageError;
     if (zipio::writeTempWorkbook(bytes, tempPath, stageError)) {
         const bool ok = load(tempPath);
-        std::remove(tempPath.c_str());
+        pathutil::removeFile(tempPath);
         return ok;
     }
 
