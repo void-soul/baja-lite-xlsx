@@ -14,6 +14,8 @@ const path = require('path');
 
 const {
   readTableAsJSON,
+  readAllSheetsAsJSON,
+  getSheetNames,
   writeTableAsJSON,
   updateCells,
   renderTemplate
@@ -1185,6 +1187,158 @@ test('values: typed streams typed batches too', null,async () => {
     onBatch: (batch) => batches.push(batch)
   });
   assert.equal(batches.flat().map((r) => r.n).join(','), '1,2');
+});
+
+// ---------------------------------------------------------------------------
+// v1 API compatibility (2.1.0): getSheetNames, readAllSheetsAsJSON,
+// options.sheetIndex and trimmed string values. Consumers still written
+// against the v1 package must keep working unchanged, so the surface is
+// pinned here.
+// ---------------------------------------------------------------------------
+
+test('getSheetNames lists the sheets in workbook order (path and Buffer)', 'sample',(fixture) => {
+  const names = getSheetNames(fixture);
+  assert.ok(Array.isArray(names));
+  assert.ok(names.length >= 1);
+  // Synchronous by contract: no promise.
+  assert.equal(typeof names.then, 'undefined');
+  // Buffer input must give the same answer.
+  assert.deepEqual(getSheetNames(fs.readFileSync(fixture)), names);
+  // And it must agree with what a read produces.
+  return readTableAsJSON(fixture, { sheetName: names[0], headerRow: 0 })
+    .then((rows) => assert.ok(Array.isArray(rows)));
+});
+
+test('getSheetNames rejects a bad input', null, () => {
+  assert.throws(() => getSheetNames(''), (err) => err.code === 'INVALID_INPUT');
+  assert.throws(() => getSheetNames('does-not-exist.xlsx'), (err) => err.code === 'FILE_NOT_FOUND');
+});
+
+test('options.sheetIndex selects a sheet by position', null,async () => {
+  // sample.xlsx' second sheet is empty, so build a workbook where every sheet
+  // has data and the selection is observable.
+  const columns = [{ index: 0 }, { index: 1 }];
+  const first = await writeTableAsJSON([['who'], ['one']], {
+    sheetName: 'S1', columns, includeHeader: false
+  });
+  const both = await writeTableAsJSON([['who'], ['two']], {
+    sheetName: 'S2', columns, includeHeader: false, sourceFile: first
+  });
+
+  const names = getSheetNames(both);
+  assert.deepEqual(names, ['S1', 'S2']);
+  const byIndex = await readTableAsJSON(both, { sheetIndex: 1, headerRow: 0 });
+  assert.deepEqual(byIndex, [{ who: 'two' }]);
+  assert.deepEqual(byIndex, await readTableAsJSON(both, { sheetName: 'S2', headerRow: 0 }));
+
+  // sheetName wins over sheetIndex (v1 precedence).
+  const explicit = await readTableAsJSON(both, { sheetName: 'S1', sheetIndex: 99 });
+  assert.deepEqual(explicit, [{ who: 'one' }]);
+
+  await assert.rejects(
+    async () => await readTableAsJSON(both, { sheetIndex: 99 }),
+    (err) => err.code === 'SHEET_INDEX_OUT_OF_RANGE'
+  );
+  assert.throws(
+    () => readTableAsJSON(both, { sheetIndex: -1 }),
+    (err) => err.code === 'INVALID_OPTIONS'
+  );
+});
+
+test('readAllSheetsAsJSON keys every sheet by name', 'sample',async (fixture) => {
+  const names = getSheetNames(fixture);
+  const all = await readAllSheetsAsJSON(fixture);
+  assert.deepEqual(Object.keys(all), names);
+
+  const first = all[names[0]];
+  assert.ok(Array.isArray(first));
+  // The first sheet's rows must match a single-sheet read exactly.
+  assert.deepEqual(first, await readTableAsJSON(fixture, { sheetName: names[0], headerRow: 0 }));
+});
+
+test('readAllSheetsAsJSON maps an unusable sheet to [] and keeps going', 'sample',async (fixture) => {
+  // sample.xlsx carries two empty sheets: they have no header row, so they
+  // cannot be keyed. v1 warned and produced [] instead of failing the
+  // workbook -- and so does this.
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  let all;
+  try {
+    all = await readAllSheetsAsJSON(fixture);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  const names = getSheetNames(fixture);
+  assert.deepEqual(Object.keys(all), names);
+  for (const [name, rows] of Object.entries(all)) {
+    assert.ok(Array.isArray(rows), `${name} must be an array`);
+    if (rows.length === 0) {
+      // The empty sheet was reported, not silently skipped.
+      assert.ok(warnings.some((line) => line.includes(name)),
+        `expected a warning naming ${name}`);
+    }
+  }
+});
+
+test('readAllSheetsAsJSON applies headerRow/skipRows/headerMap to every sheet', null,async () => {
+  const columns = [{ index: 0 }, { index: 1 }];
+  const first = await writeTableAsJSON([['who', 'tag'], ['one', 'x']], {
+    sheetName: 'S1', columns, includeHeader: false
+  });
+  const both = await writeTableAsJSON([['who', 'tag'], ['two', 'y']], {
+    sheetName: 'S2', columns, includeHeader: false, sourceFile: first
+  });
+
+  const all = await readAllSheetsAsJSON(both, { headerRow: 0, headerMap: { who: 'person' } });
+  assert.deepEqual(Object.keys(all), ['S1', 'S2']);
+  assert.deepEqual(all.S1, [{ person: 'one', tag: 'x' }]);
+  assert.deepEqual(all.S2, [{ person: 'two', tag: 'y' }]);
+
+  // Skipping the header row drops the data, exactly like a single-sheet read.
+  const skipped = await readAllSheetsAsJSON(both, { headerRow: 0, skipRows: [0] });
+  assert.deepEqual(skipped.S1, [{ who: 'one', tag: 'x' }]);
+});
+
+test('string cell values are trimmed', null,async () => {
+  const workbook = await writeTableAsJSON(
+    [{ padded: '  spaced  ', plain: 'tight' }],
+    { sheetName: 'S', columns: { padded: {}, plain: {} } }
+  );
+  const rows = await readTableAsJSON(workbook);
+  assert.equal(rows[0].padded, 'spaced');
+  assert.equal(rows[0].plain, 'tight');
+
+  // Streamed batches trim the same way.
+  const batches = [];
+  await readTableAsJSON(workbook, {
+    includeImages: false, batchSize: 1, onBatch: (batch) => batches.push(batch)
+  });
+  assert.equal(batches.flat()[0].padded, 'spaced');
+
+  // readAllSheetsAsJSON trims too.
+  const all = await readAllSheetsAsJSON(workbook);
+  assert.equal(all.S[0].padded, 'spaced');
+});
+
+test('floating (drawing anchored) images are attached to their anchor cell', 'sample',async (fixture) => {
+  // sample.xlsx holds one WPS DISPIMG image (row 0) and one floating picture
+  // anchored over the last row (row 2). The floating one used to be dropped:
+  // the drawing could not be mapped to a sheet, and the anchor tags were
+  // searched without their xdr: namespace prefix.
+  const { rows, warnings } = await readTableAsJSON(fixture, { includeWarnings: true });
+  const floating = rows[2] && rows[2].photo1;
+  assert.ok(floating && Buffer.isBuffer(floating.data),
+    `floating image missing at rows[2].photo1: ${JSON.stringify(floating)}`);
+  assert.equal(floating.type, 'image/png');
+
+  const unmapped = warnings.filter((w) => w.includes('not mapped to any sheet'));
+  assert.deepEqual(unmapped, [], 'no drawing should be left unattached');
+
+  // The same file read through the direct engine must agree.
+  const direct = await readTableAsJSON(fixture, { engine: 'xml' });
+  assert.equal(direct[2].photo1.name, floating.name);
 });
 
 // ---------------------------------------------------------------------------
