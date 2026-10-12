@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.1.0 (2026-10-12) — v1 API compatibility + floating-image fix
+
+**Floating images were silently dropped on every read.** Two independent bugs in
+the image pipeline combined to lose every drawing-anchored picture
+(`twoCellAnchor` / `oneCellAnchor`), on Windows, Linux and macOS alike:
+
+- `buildDrawingSheetMap` stripped the worksheet part name with
+  `find(".xml.rels") + substr(0, 6)`, turning `"sheet1.xml.rels"` into
+  `"sheet1"` and looking that up against the key `"sheet1.xml"` — so **no**
+  drawing could ever be mapped to a sheet. It now strips only `.rels`.
+- `parseDrawingXml` searched for `<twoCellAnchor` while drawing parts are
+  written as `<xdr:twoCellAnchor ...>`, so **no** anchor was ever parsed (the
+  closing tag had the same problem). Anchor, `from`/`to` and `col`/`row` are
+  now matched by local name, tolerating any namespace prefix.
+
+Consequence in practice: a photo placed as a floating picture over an otherwise
+empty cell (a common WPS export shape) no longer disappears, while WPS
+`DISPIMG` cell images were unaffected — which is why the suite never noticed.
+
+New in the API (compatibility with the v1 package that used to be vendored
+inside consuming services):
+
+- **`getSheetNames(input)`** — worksheet names in workbook order,
+  **synchronous** like v1; only `xl/workbook.xml` is parsed.
+- **`readAllSheetsAsJSON(input, options?)`** — resolves to
+  `{ sheetName: rows }`. `headerRow` / `skipRows` / `headerMap` apply to every
+  sheet; a sheet that cannot be keyed is warned about and mapped to `[]`
+  instead of failing the workbook (v1 behavior).
+- **`options.sheetIndex`** on `readTableAsJSON`: select a sheet by position
+  (0-based), lower priority than `sheetName`; out of range throws the new
+  `SHEET_INDEX_OUT_OF_RANGE`.
+- **String cell values are trimmed**, matching v1's row processing.
+
+Build tooling:
+
+- **`scripts/build-win.js`**: one-shot Windows build. node-gyp's generated
+  projects pin no Windows SDK, so the toolset default (`10.0.26100.0`) is
+  requested even when it is not installed (MSB8036); the helper reads the real
+  SDK root from the registry `KitsRoot10`, retargets every generated project
+  (including `build/node_modules/node-addon-api/nothing.vcxproj`), sets
+  `PYTHONUTF8=1` (gyp's MSVS generator decodes child output with the GBK
+  locale codec and crashes with `UnicodeDecodeError` otherwise) and clears
+  stale debug info (LNK1103).
+- `scripts/require-vcpkg-root.js`: the install hint said `zip:x64-windows`;
+  the vcpkg port is `libzip`.
+
 ## 2.0.0 (2026-09-18) — the async-only API
 
 **Breaking: the synchronous methods are gone.** `readTableAsJSONAsync`,

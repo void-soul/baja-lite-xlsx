@@ -23,6 +23,12 @@ Thumbs.db
 # Test outputs
 test/output/
 
+# Spreadsheets dropped into the repository root for manual testing: they
+# routinely carry personal data (names, ID numbers, photos) and must never be
+# committed by accident. Fixtures live in examples/ and test/, which this rule
+# does not touch.
+/*.xlsx
+
 # Local install-and-run sandbox for released packages (scripts plus a
 # node_modules tree; never part of the repository).
 .smoke/

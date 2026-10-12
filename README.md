@@ -10,10 +10,15 @@ extracting embedded images, built on [xlnt](https://github.com/tfussell/xlnt) an
 
 ## Features
 
-- **Everything is async.** Four functions, all returning Promises; heavy work
+- **Everything is async.** Five functions returning Promises; heavy work
   (parsing, XML generation, deflate, package assembly, file writes) runs on the
-  libuv thread pool, so servers and Electron UIs keep responding
-- Read a sheet as JSON rows: `readTableAsJSON`
+  libuv thread pool, so servers and Electron UIs keep responding. Only
+  `getSheetNames` is synchronous — it just reads the workbook's sheet list
+- Read a sheet as JSON rows: `readTableAsJSON` (by name via `sheetName`, by
+  position via `sheetIndex`)
+- Read every sheet at once: `readAllSheetsAsJSON` — resolves to
+  `{ sheetName: rows }`
+- List the sheets of a workbook: `getSheetNames`
 - Write JSON into a workbook: `writeTableAsJSON` — appends to any sheet and
   builds multi-sheet workbooks by chaining on the returned `Buffer`
 - Patch individual cells: `updateCells`
@@ -33,8 +38,9 @@ extracting embedded images, built on [xlnt](https://github.com/tfussell/xlnt) an
   platform+architecture covers every Node.js >= 16 and every Electron version
 
 > By default every cell value is returned as a **string** (numbers and dates
-> included; dates are formatted as `YYYY-MM-DD[ HH:MM:SS]`). Cells containing
-> pictures return image objects instead; pass `values: 'typed'` for real types.
+> included; dates are formatted as `YYYY-MM-DD[ HH:MM:SS]`). String values are
+> trimmed. Cells containing pictures return image objects instead; pass
+> `values: 'typed'` for real types.
 
 ## Install
 
@@ -50,8 +56,13 @@ the required runtime DLLs.
 ## Quick start
 
 ```javascript
-const { readTableAsJSON, writeTableAsJSON, updateCells, renderTemplate } =
-  require('baja-lite-xlsx');
+const {
+  readTableAsJSON, readAllSheetsAsJSON, getSheetNames,
+  writeTableAsJSON, updateCells, renderTemplate
+} = require('baja-lite-xlsx');
+
+// Which sheets does it have? (synchronous)
+console.log(getSheetNames('data.xlsx'));           // => ['Sheet1', 'Summary']
 
 // Read: => [ { fullName: 'Ada', age: '36' }, { fullName: 'Alan', age: '41' } ]
 const rows = await readTableAsJSON('data.xlsx', {
@@ -60,6 +71,9 @@ const rows = await readTableAsJSON('data.xlsx', {
   values: 'typed',                                    // engine: 'xml' -> real types
   engine: 'xml'                                       // direct reader: fastest on big files
 });
+
+// Read every sheet: => { Sheet1: [...], Summary: [...] }
+const all = await readAllSheetsAsJSON('data.xlsx', { headerRow: 1, skipRows: [0] });
 
 // Write: => Buffer
 const bytes = await writeTableAsJSON(rows2, { sheetName: 'Data' });
@@ -103,6 +117,7 @@ stays responsive. Invalid arguments throw synchronously; parse failures reject.
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
 | `sheetName` | `string` | no | first sheet | Sheet to read |
+| `sheetIndex` | `number` | no | first sheet | Sheet to read by position (0-based); ignored when `sheetName` is given. Out of range → `SHEET_INDEX_OUT_OF_RANGE` |
 | `headerRow` | `number` | no | `0` | Header row index (0-based) |
 | `skipRows` | `number[]` | no | `[]` | Row indices to skip (0-based) |
 | `headerMap` | `object` | no | `{}` | Rename headers: `{ original: 'renamed' }` |
@@ -118,7 +133,7 @@ stays responsive. Invalid arguments throw synchronously; parse failures reject.
 | `batchSize` | `number` | no | `50000` | Rows per batch when `onBatch` is used |
 
 **Returns** `Promise<Array<Object>>` — one object per data row, keyed by the
-header texts after `headerMap`. Every value is a `string`; a cell holding a
+header texts after `headerMap`. Every value is a trimmed `string`; a cell holding a
 picture contains an image object instead. With `values: 'typed'` the values are
 real numbers, booleans and `Date`s.
 
@@ -136,6 +151,59 @@ const { rowCount } = await readTableAsJSON('huge.xlsx', {
   batchSize: 50000,
   onBatch(batch, meta) { writeToDatabase(batch); }   // meta: { startIndex, count }
 });
+```
+
+### readAllSheetsAsJSON(input, options?)
+
+Reads **every** worksheet and resolves to an object keyed by sheet name, each
+value being that sheet's rows — the same row shape `readTableAsJSON` returns.
+
+`headerRow`, `skipRows` and `headerMap` apply to every sheet, so a workbook of
+same-shaped sheets (one per event, per region, …) is read in a single call. A
+sheet whose header row is missing — or that otherwise fails to key — is reported
+through `console.warn` and mapped to an empty array instead of failing the whole
+workbook.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `input` | `string \| Buffer` | **yes** | – | File path, workbook bytes, or base64 string |
+| `options` | `object` | no | `{}` | `headerRow`, `skipRows`, `headerMap`, `inputEncoding`, `maxRows`, `maxCols`, `columns`, `includeImages`, `engine`, `values` (as above) |
+
+**Returns** `Promise<Object<string, Array<Object>>>` — `{ 'Sheet1': [...], 'Summary': [...] }`.
+
+**Example**
+
+```javascript
+const sheets = await readAllSheetsAsJSON('events.xlsx', {
+  headerRow: 1,                                  // row 2 holds the headers
+  skipRows: [0],                                 // row 1 is a title
+  headerMap: { 单位id: 'companyId', 球队名称: 'teamName' }
+});
+
+for (const [name, rows] of Object.entries(sheets)) {
+  console.log(name, rows.length);
+}
+```
+
+### getSheetNames(input)
+
+Returns the worksheet names of a workbook, in workbook order.
+
+**Synchronous**, like in v1: only the package's `xl/workbook.xml` is parsed, so
+no sheet data is touched — cheap enough to call for validation before a read.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `input` | `string \| Buffer` | **yes** | File path, workbook bytes, or base64 string |
+
+**Returns** `string[]` — e.g. `['Sheet1', 'Summary']`. Throws `NO_SHEETS` when the
+workbook has no sheets.
+
+**Example**
+
+```javascript
+const names = getSheetNames('data.xlsx');               // ['Sheet1', 'Summary']
+const first  = await readTableAsJSON('data.xlsx', { sheetIndex: 0 });  // same as no option
 ```
 
 ### Image attachment rules
@@ -161,6 +229,7 @@ Every thrown error carries a machine-readable `code`:
 | `INVALID_OPTIONS` | Options failed validation (e.g. negative `headerRow`) |
 | `NO_SHEETS` | Workbook has no sheets |
 | `SHEET_NOT_FOUND` | `options.sheetName` matches no sheet |
+| `SHEET_INDEX_OUT_OF_RANGE` | `options.sheetIndex` is beyond the last sheet |
 | `HEADER_ROW_OUT_OF_RANGE` | `headerRow` beyond the available rows |
 | `PARSE_ERROR` / `READ_FAILED` | Workbook parsing failed |
 
@@ -443,6 +512,31 @@ npm run build:dev     # or: npm run build
 npm test
 ```
 
+### Windows: SDK version and locale quirks
+
+Two problems bite on Windows machines whose toolchain does not exactly match the
+generated project; `scripts/build-win.js` handles both:
+
+```bash
+# One-shot: configure -> retarget to the newest INSTALLED SDK -> build
+set VCPKG_ROOT=C:\vcpkg
+node scripts/build-win.js
+```
+
+- **`MSB8036: 找不到 Windows SDK 版本 10.0.26100.0`** — the MSBuild projects
+  node-gyp generates do not pin a Windows SDK, so the VS toolset default
+  (`10.0.26100.0` for VS 2022 17.14) is requested even when it is not installed.
+  The helper reads the real SDK root from the registry
+  (`HKLM\...\Windows Kits\Installed Roots` → `KitsRoot10`, which is *not* always
+  `C:\Program Files (x86)\Windows Kits\10`), picks the newest installed version
+  and rewrites `<WindowsTargetPlatformVersion>` in every generated project —
+  including `build/node_modules/node-addon-api/nothing.vcxproj`.
+- **`UnicodeDecodeError: 'gbk' codec` during `node-gyp configure`** — gyp's MSVS
+  generator decodes child-process output with the locale codec. Set `PYTHONUTF8=1`
+  (the helper does this for you).
+- **`LNK1103: 调试信息损坏`** — stale `.pdb` / `.ipdb` / `.iobj` from an
+  interrupted build; delete them and build again.
+
 ## CI & releases
 
 - Push to `master` / pull requests: lint + typecheck, native build, `npm test`.
@@ -502,6 +596,12 @@ If the module fails to load:
 2. Copy the DLLs from `%VCPKG_ROOT%\installed\x64-windows\bin` next to
    `baja_xlsx.node` — `node scripts/package-dlls.js` does this for you.
 3. Set `BAJA_XLSX_TEST_LOAD=1` and re-run the install step to see the loader error.
+4. `baja_xlsx.node` is a Windows binary — an "is not a valid Win32 application"
+   error means a Linux/macOS build ended up in `build/Release` (delete it and
+   re-run the build, or copy the matching prebuild).
+
+Building (rather than loading) fails with `MSB8036` or `UnicodeDecodeError` —
+see [Windows: SDK version and locale quirks](#windows-sdk-version-and-locale-quirks).
 
 ## Security notes
 

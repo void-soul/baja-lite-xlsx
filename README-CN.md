@@ -10,10 +10,13 @@
 
 ## 特性
 
-- **全部 API 均为异步**：只有四个函数，全部返回 Promise；重活（解析、XML 生成、
-  deflate、压缩包装配、写文件）都在 libuv 线程池执行，服务端与 Electron UI 始终
-  响应
-- 读取：`readTableAsJSON`，一行调用把工作表读成 JSON 数组
+- **全部 API 均为异步**：五个函数返回 Promise；重活（解析、XML 生成、deflate、
+  压缩包装配、写文件）都在 libuv 线程池执行，服务端与 Electron UI 始终
+  响应。只有 `getSheetNames` 是同步的 —— 它只读工作簿的 sheet 列表
+- 读取：`readTableAsJSON`，一行调用把工作表读成 JSON 数组（按 `sheetName` 选表，
+  或按 `sheetIndex` 按位置选表）
+- 一次读全部工作表：`readAllSheetsAsJSON` —— resolve 为 `{ sheetName: 行数组 }`
+- 列出工作簿的表：`getSheetNames`
 - 写入：`writeTableAsJSON` —— 可向任意 sheet **追加**行，并通过在返回的
   `Buffer` 上链式调用构建多 sheet 工作簿
 - 单元格级修补：`updateCells`
@@ -32,8 +35,8 @@
   一个二进制，即可覆盖所有 Node.js ≥ 16 与所有 Electron 版本
 
 > 默认所有单元格值都以**字符串**返回（数字、日期同理；日期格式为
-> `YYYY-MM-DD[ HH:MM:SS]`）。含图片的单元格返回图片对象；传 `values: 'typed'`
-> 可获得真实类型。
+> `YYYY-MM-DD[ HH:MM:SS]`），字符串值会去掉首尾空白。含图片的单元格返回图片对象；
+> 传 `values: 'typed'` 可获得真实类型。
 
 ## 安装
 
@@ -47,8 +50,13 @@ npm install baja-lite-xlsx
 ## 快速开始
 
 ```javascript
-const { readTableAsJSON, writeTableAsJSON, updateCells, renderTemplate } =
-  require('baja-lite-xlsx');
+const {
+  readTableAsJSON, readAllSheetsAsJSON, getSheetNames,
+  writeTableAsJSON, updateCells, renderTemplate
+} = require('baja-lite-xlsx');
+
+// 有哪些工作表？（同步调用）
+console.log(getSheetNames('data.xlsx'));           // => ['Sheet1', '汇总']
 
 // 读取：=> [ { 姓名: '张三', 金额: '1200' }, { 姓名: '李四', 金额: '980' } ]
 const rows = await readTableAsJSON('data.xlsx', {
@@ -57,6 +65,9 @@ const rows = await readTableAsJSON('data.xlsx', {
   values: 'typed',           // 配合 engine: 'xml' 返回真实类型
   engine: 'xml'              // 直读引擎：大文件更快
 });
+
+// 一次读全部工作表：=> { Sheet1: [...], 汇总: [...] }
+const all = await readAllSheetsAsJSON('data.xlsx', { headerRow: 1, skipRows: [0] });
 
 // 写入：=> Buffer
 const bytes = await writeTableAsJSON(rows2, { sheetName: 'Data' });
@@ -100,6 +111,7 @@ reject。
 | 选项 | 类型 | 是否必传 | 默认值 | 说明 |
 |------|------|----------|--------|------|
 | `sheetName` | `string` | 否 | 第一个工作表 | 要读取的工作表 |
+| `sheetIndex` | `number` | 否 | 第一个工作表 | 按位置（从 0 开始）选择工作表；传了 `sheetName` 时本项被忽略。越界抛 `SHEET_INDEX_OUT_OF_RANGE` |
 | `headerRow` | `number` | 否 | `0` | 表头行索引（从 0 开始） |
 | `skipRows` | `number[]` | 否 | `[]` | 需要跳过的行索引（从 0 开始） |
 | `headerMap` | `object` | 否 | `{}` | 表头重命名：`{ 原表头: '新表头' }` |
@@ -115,8 +127,8 @@ reject。
 | `batchSize` | `number` | 否 | `50000` | `onBatch` 每批行数 |
 
 **返回** `Promise<Array<Object>>`：每个数据行一个对象，键为应用 `headerMap` 之后的
-表头文字，值全部为字符串；单元格内是图片时则为图片对象。传 `values: 'typed'` 时
-值为真实的数字、布尔与 `Date`。
+表头文字，值全部为**去首尾空白**的字符串；单元格内是图片时则为图片对象。传
+`values: 'typed'` 时值为真实的数字、布尔与 `Date`。
 
 **示例**
 
@@ -132,6 +144,56 @@ const { rowCount } = await readTableAsJSON('huge.xlsx', {
   batchSize: 50000,
   onBatch(batch, meta) { writeToDatabase(batch); }   // meta: { startIndex, count }
 });
+```
+
+### readAllSheetsAsJSON(input, options?)
+
+读取**全部**工作表，resolve 为以工作表名为键的对象，每个值是该表的行数组 —— 行结构
+与 `readTableAsJSON` 完全一致。
+
+`headerRow`、`skipRows`、`headerMap` 对每个工作表生效，因此“每个分赛事/每个地区一个
+sheet、且表结构相同”的工作簿一次就能读完。某个工作表无法确定表头（例如表头行不存在）
+时，只通过 `console.warn` 提示并映射为空数组，不会让整簿失败。
+
+| 参数 | 类型 | 是否必传 | 默认值 | 说明 |
+|------|------|----------|--------|------|
+| `input` | `string \| Buffer` | **必传** | – | 文件路径、工作簿字节或 base64 字符串 |
+| `options` | `object` | 否 | `{}` | 支持 `headerRow`、`skipRows`、`headerMap`、`inputEncoding`、`maxRows`、`maxCols`、`columns`、`includeImages`、`engine`、`values`（含义同上） |
+
+**返回** `Promise<Object<string, Array<Object>>>`，例如 `{ 'Sheet1': [...], '汇总': [...] }`。
+
+**示例**
+
+```javascript
+const sheets = await readAllSheetsAsJSON('events.xlsx', {
+  headerRow: 1,                            // 第 2 行是表头
+  skipRows: [0],                           // 第 1 行是标题
+  headerMap: { 单位id: 'companyId', 球队名称: 'teamName' }
+});
+
+for (const [name, rows] of Object.entries(sheets)) {
+  console.log(name, rows.length);
+}
+```
+
+### getSheetNames(input)
+
+按工作簿顺序返回所有工作表名。
+
+与 v1 一致是**同步**函数：只解析压缩包里的 `xl/workbook.xml`，不触碰任何单元格数据，
+开销足够小，可以在正式读取前先做校验。
+
+| 参数 | 类型 | 是否必传 | 说明 |
+|------|------|----------|------|
+| `input` | `string \| Buffer` | **必传** | 文件路径、工作簿字节或 base64 字符串 |
+
+**返回** `string[]`，例如 `['Sheet1', '汇总']`；工作簿没有任何工作表时抛 `NO_SHEETS`。
+
+**示例**
+
+```javascript
+const names = getSheetNames('data.xlsx');                            // ['Sheet1', '汇总']
+const first  = await readTableAsJSON('data.xlsx', { sheetIndex: 0 }); // 与不传选项等价
 ```
 
 ### 图片归属规则
@@ -156,6 +218,7 @@ const { rowCount } = await readTableAsJSON('huge.xlsx', {
 | `INVALID_OPTIONS` | 选项校验失败（如 `headerRow` 为负） |
 | `NO_SHEETS` | 工作簿中没有工作表 |
 | `SHEET_NOT_FOUND` | `options.sheetName` 未匹配到工作表 |
+| `SHEET_INDEX_OUT_OF_RANGE` | `options.sheetIndex` 超出最后一个工作表 |
 | `HEADER_ROW_OUT_OF_RANGE` | `headerRow` 超出可用行范围 |
 | `PARSE_ERROR` / `READ_FAILED` | 工作簿解析失败 |
 
@@ -419,6 +482,27 @@ npm run build:dev     # 或者：npm run build
 npm test
 ```
 
+### Windows：SDK 版本与区域设置
+
+Windows 上有两类问题会打断构建，`scripts/build-win.js` 已一并处理：
+
+```bash
+# 一键完成：configure -> 重定向到已安装的最高 SDK -> 编译
+set VCPKG_ROOT=C:\vcpkg
+node scripts/build-win.js
+```
+
+- **`MSB8036: 找不到 Windows SDK 版本 10.0.26100.0`** —— node-gyp 生成的工程没有固定
+  Windows SDK 版本，于是工具集会用默认值（VS 2022 17.14 默认是 `10.0.26100.0`），
+  本机没装就报错。该脚本从注册表读取真实 SDK 根目录
+  （`HKLM\...\Windows Kits\Installed Roots` 的 `KitsRoot10`，**不一定**是
+  `C:\Program Files (x86)\Windows Kits\10`），取已安装的最高版本，并改写所有生成工程里的
+  `<WindowsTargetPlatformVersion>` —— **包括 `build/node_modules/node-addon-api/nothing.vcxproj`**。
+- **`node-gyp configure` 报 `UnicodeDecodeError: 'gbk' codec`** —— gyp 的 MSVS 生成器用
+  区域编码（GBK）解码子进程输出。设置 `PYTHONUTF8=1` 即可（脚本已内置）。
+- **`LNK1103: 调试信息损坏`** —— 上次构建中断残留的 `.pdb` / `.ipdb` / `.iobj`，
+  删掉后重新编译。
+
 ## CI 与发布
 
 - 推送到 `master` / PR：lint + 类型检查、原生构建、`npm test`；
@@ -473,6 +557,12 @@ Release 下载，包体小且始终与发布资产一致。
 2. 把 `%VCPKG_ROOT%\installed\x64-windows\bin` 下的 DLL 复制到 `baja_xlsx.node`
    旁边（`node scripts/package-dlls.js` 可自动完成）；
 3. 设置 `BAJA_XLSX_TEST_LOAD=1` 后重跑安装步骤，可看到具体的加载错误。
+4. `baja_xlsx.node` 必须是 Windows 版二进制 —— 若报 “is not a valid Win32
+   application”，说明 `build/Release` 里是 Linux/macOS 构建产物，删掉后重新编译
+   （或复制对应的预编译包）。
+
+编译阶段报 `MSB8036` 或 `UnicodeDecodeError`，见
+[Windows：SDK 版本与区域设置](#windowssdk-版本与区域设置)。
 
 ## 安全说明
 
