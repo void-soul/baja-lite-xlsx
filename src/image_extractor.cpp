@@ -49,6 +49,69 @@ bool readFileByName(zip_t* za, const std::string& wanted,
     return false;
 }
 
+// Opening tag by LOCAL name, tolerating any namespace prefix: both
+// "<xdr:twoCellAnchor ...>" and "<twoCellAnchor ...>" match. Drawing parts
+// are written with the xdr: prefix by Excel/WPS alike, but the prefix is not
+// guaranteed, and an unprefixed search silently drops every anchor (which is
+// how floating images went missing).
+size_t findTagOpenLocal(const std::string& xml, const std::string& local, size_t from) {
+    size_t pos = from;
+    while ((pos = xml.find(local, pos)) != std::string::npos) {
+        const size_t nextIdx = pos + local.size();
+        const char next = nextIdx < xml.size() ? xml[nextIdx] : '\0';
+        if (next == ' ' || next == '>' || next == '/' || next == '\t' ||
+            next == '\n' || next == '\r') {
+            if (pos > 0 && xml[pos - 1] == '<') {
+                return pos; // unprefixed
+            }
+            if (pos > 1 && xml[pos - 1] == ':') {
+                size_t p = pos - 1; // walk back over the prefix name
+                while (p > 0 && (std::isalnum(static_cast<unsigned char>(xml[p - 1])) ||
+                                 xml[p - 1] == '_' || xml[p - 1] == '-' || xml[p - 1] == '.')) {
+                    --p;
+                }
+                if (p > 0 && xml[p - 1] == '<') {
+                    return pos; // "<prefix:local"
+                }
+            }
+        }
+        pos += 1;
+    }
+    return std::string::npos;
+}
+
+// Matching close tag ("</xdr:local>" or "</local>"); returns the index of '<'.
+size_t findTagCloseLocal(const std::string& xml, const std::string& local, size_t from) {
+    size_t pos = from;
+    while ((pos = xml.find("</", pos)) != std::string::npos) {
+        const size_t gt = xml.find('>', pos);
+        if (gt == std::string::npos) return std::string::npos;
+        const std::string name = xml.substr(pos + 2, gt - pos - 2);
+        const size_t colon = name.rfind(':');
+        const std::string bare = colon != std::string::npos ? name.substr(colon + 1) : name;
+        if (bare == local) return pos;
+        pos = gt + 1;
+    }
+    return std::string::npos;
+}
+
+// Text content of <prefix:local>...</prefix:local> starting the search at from.
+bool elementTextLocal(const std::string& xml, const std::string& local, size_t from,
+                      std::string& out) {
+    const size_t open = findTagOpenLocal(xml, local, from);
+    if (open == std::string::npos) return false;
+    const size_t gt = xml.find('>', open);
+    if (gt == std::string::npos) return false;
+    if (gt > open && xml[gt - 1] == '/') { // self-closing: empty
+        out.clear();
+        return true;
+    }
+    const size_t close = findTagCloseLocal(xml, local, gt + 1);
+    if (close == std::string::npos) return false;
+    out = xml.substr(gt + 1, close - gt - 1);
+    return true;
+}
+
 } // namespace
 
 std::string ImageExtractor::getContentType(const std::string& extension) {
@@ -126,9 +189,13 @@ std::map<std::string, std::string> ImageExtractor::buildDrawingSheetMap(
         const size_t slash = filename.find_last_of('/');
         const std::string base = (slash != std::string::npos)
                                      ? filename.substr(slash + 1) : filename;
-        const size_t extPos = base.find(".xml.rels");
+        // Strip only the trailing ".rels": "sheet1.xml.rels" -> "sheet1.xml",
+        // which is the form sheetTargetToName is keyed by (the basename of the
+        // workbook relationship target). Stripping ".xml.rels" instead would
+        // yield "sheet1" and never match, leaving every drawing unmapped.
+        const size_t relsPos = base.rfind(".rels");
         const std::string sheetFile =
-            (extPos != std::string::npos) ? base.substr(0, extPos) : base; // "sheet1.xml"
+            (relsPos != std::string::npos) ? base.substr(0, relsPos) : base; // "sheet1.xml"
 
         auto targetIt = sheetTargetToName.find(sheetFile);
         if (targetIt == sheetTargetToName.end()) continue;
@@ -163,14 +230,14 @@ void ImageExtractor::parseDrawingXml(const std::string& xmlContent,
     };
 
     for (const auto& spec : specs) {
-        const std::string closing = std::string("</") + spec.tag + ">";
         size_t pos = 0;
-        while ((pos = xmlp::findTagOpen(xmlContent, spec.tag, pos)) != std::string::npos) {
-            const size_t endPos = xmlContent.find(closing, pos);
+        while ((pos = findTagOpenLocal(xmlContent, spec.tag, pos)) != std::string::npos) {
+            const size_t endPos = findTagCloseLocal(xmlContent, spec.tag, pos);
             if (endPos == std::string::npos) break;
+            const size_t closeEnd = xmlContent.find('>', endPos);
 
             auto skipAnchor = [&]() {
-                pos = endPos + closing.size();
+                pos = (closeEnd != std::string::npos) ? closeEnd + 1 : endPos + 1;
             };
 
             DrawingAnchor anchor;
@@ -181,7 +248,7 @@ void ImageExtractor::parseDrawingXml(const std::string& xmlContent,
             anchor.toRow = 0;
 
             // from coordinates (required)
-            const size_t fromTag = xmlp::findTagOpen(xmlContent, "xdr:from", pos);
+            const size_t fromTag = findTagOpenLocal(xmlContent, "from", pos);
             if (fromTag == std::string::npos || fromTag >= endPos) {
                 warnings.push_back(std::string("Missing <xdr:from> in ") +
                                    spec.tag + " for sheet '" + sheetName + "': skipped");
@@ -190,8 +257,8 @@ void ImageExtractor::parseDrawingXml(const std::string& xmlContent,
             }
             std::string colStr;
             std::string rowStr;
-            if (!xmlp::getElementText(xmlContent, "xdr:col", fromTag, colStr) ||
-                !xmlp::getElementText(xmlContent, "xdr:row", fromTag, rowStr)) {
+            if (!elementTextLocal(xmlContent, "col", fromTag, colStr) ||
+                !elementTextLocal(xmlContent, "row", fromTag, rowStr)) {
                 warnings.push_back(std::string("Incomplete <xdr:from> in ") +
                                    spec.tag + " for sheet '" + sheetName + "': skipped");
                 skipAnchor();
@@ -210,14 +277,14 @@ void ImageExtractor::parseDrawingXml(const std::string& xmlContent,
             anchor.fromRow = row;
 
             if (spec.floating) {
-                const size_t toTag = xmlp::findTagOpen(xmlContent, "xdr:to", pos);
+                const size_t toTag = findTagOpenLocal(xmlContent, "to", pos);
                 std::string toColStr;
                 std::string toRowStr;
                 int toCol = 0;
                 int toRow = 0;
                 if (toTag != std::string::npos && toTag < endPos &&
-                    xmlp::getElementText(xmlContent, "xdr:col", toTag, toColStr) &&
-                    xmlp::getElementText(xmlContent, "xdr:row", toTag, toRowStr) &&
+                    elementTextLocal(xmlContent, "col", toTag, toColStr) &&
+                    elementTextLocal(xmlContent, "row", toTag, toRowStr) &&
                     xmlp::parseNonNegativeInt(toColStr, toCol) &&
                     xmlp::parseNonNegativeInt(toRowStr, toRow)) {
                     anchor.toCol = toCol;
@@ -254,7 +321,7 @@ void ImageExtractor::parseDrawingXml(const std::string& xmlContent,
             if (!anchor.imageName.empty()) {
                 outAnchors.push_back(anchor);
             }
-            pos = endPos + closing.size();
+            skipAnchor();
         }
     }
 }

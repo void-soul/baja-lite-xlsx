@@ -16,9 +16,9 @@ if (!root) {
   console.error('Fix:');
   console.error('  1. Install vcpkg: https://github.com/microsoft/vcpkg');
   console.error('  2. Install dependencies (triplet per platform):');
-  console.error('       Windows:      vcpkg install xlnt:x64-windows zip:x64-windows');
-  console.error('       Linux:        vcpkg install xlnt:x64-linux zip:x64-linux');
-  console.error('       macOS (ARM):  vcpkg install xlnt:arm64-osx zip:arm64-osx');
+  console.error('       Windows:      vcpkg install xlnt:x64-windows libzip:x64-windows');
+  console.error('       Linux:        vcpkg install xlnt:x64-linux libzip:x64-linux');
+  console.error('       macOS (ARM):  vcpkg install xlnt:arm64-osx libzip:arm64-osx');
   console.error('  3. Set the environment variable, e.g.:');
   console.error('       set VCPKG_ROOT=C:\\vcpkg      (cmd)');
   console.error('       $env:VCPKG_ROOT = "C:\\vcpkg"  (PowerShell)');
