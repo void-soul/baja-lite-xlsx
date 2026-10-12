@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 
-const { renderEjsTemplate } = require('./lib/ejs-engine');
+const { renderEjsTemplate, parseSheets } = require('./lib/ejs-engine');
 
 // ---------------------------------------------------------------------------
 // Native addon loading
@@ -122,6 +122,7 @@ function validateOptions(options) {
   }
   const {
     sheetName = null,
+    sheetIndex = null,
     headerRow = 0,
     skipRows = [],
     headerMap = {},
@@ -139,6 +140,10 @@ function validateOptions(options) {
 
   if (sheetName !== null && sheetName !== undefined && typeof sheetName !== 'string') {
     throw makeError('INVALID_OPTIONS', 'options.sheetName must be a string');
+  }
+  if (sheetIndex !== null && sheetIndex !== undefined &&
+      (!Number.isInteger(sheetIndex) || sheetIndex < 0)) {
+    throw makeError('INVALID_OPTIONS', `options.sheetIndex must be a non-negative integer, got ${sheetIndex}`);
   }
   if (!Number.isInteger(headerRow) || headerRow < 0) {
     throw makeError('INVALID_OPTIONS', `options.headerRow must be a non-negative integer, got ${headerRow}`);
@@ -192,6 +197,7 @@ function validateOptions(options) {
 
   return {
     sheetName: sheetName === undefined ? null : sheetName,
+    sheetIndex: sheetIndex === undefined ? null : sheetIndex,
     headerRow,
     skipRows,
     headerMap,
@@ -278,7 +284,9 @@ function transformToRows(nativeResult, opts) {
       const raw = row[colIndex];
       const value = raw === undefined || raw === null ? '' : decode(raw);
       if (header) {
-        rowObj[header] = value;
+        // Legacy compatibility: string cells come back trimmed (WPS exports
+        // pad cells with stray whitespace that broke equality checks).
+        rowObj[header] = typeof value === 'string' ? value.trim() : value;
       }
     }
     rows.push(rowObj);
@@ -342,7 +350,8 @@ function createBatchHandler(opts) {
       for (let c = 0; c < mappedHeaders.length && c < row.length; c++) {
         const header = mappedHeaders[c];
         if (header) {
-          rowObj[header] = row[c];
+          const cell = row[c];
+          rowObj[header] = typeof cell === 'string' ? cell.trim() : cell;
         }
       }
       rows.push(rowObj);
@@ -976,6 +985,161 @@ function renderTemplate(values, options = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Legacy compatibility (baja-lite-xlsx v1 API surface)
+//
+// Existing callers (e.g. attack-service) were written against the v1 package
+// that lived in the consuming repo: readTableAsJSON / readAllSheetsAsJSON /
+// getSheetNames, plus the sheetIndex read option. Those three entry points and
+// that option are re-created here on top of the v2 reader, so code written
+// against the old package keeps compiling and running unchanged:
+//   - readTableAsJSON already matches the v1 signature (path | Buffer | base64
+//     in, array of row objects out); only sheetIndex had to be added.
+//   - getSheetNames stays synchronous, like v1.
+//   - readAllSheetsAsJSON resolves to { sheetName: rows } and, like v1, a sheet
+//     that cannot be keyed (missing header row, ...) is warned about and
+//     mapped to [] instead of failing the whole workbook.
+//   - string cell values are trimmed, like v1's processSheetData.
+// ---------------------------------------------------------------------------
+
+const WORKBOOK_PART = 'xl/workbook.xml';
+const WORKBOOK_RELS_PART = 'xl/_rels/workbook.xml.rels';
+
+function unescapeXmlText(text) {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&amp;/g, '&'); // last, so "&amp;lt;" stays escaped once
+}
+
+function findPackagePart(parts, name) {
+  return parts.parts.find((part) => part.name.replace(/\\/g, '/') === name) || null;
+}
+
+/**
+ * Worksheet names in workbook order, read straight from the package (no sheet
+ * data is parsed). Used by getSheetNames and to resolve options.sheetIndex.
+ * @param {string|Buffer} source - File path or workbook bytes.
+ * @returns {string[]}
+ * @private
+ */
+function sheetNamesFromPackage(source) {
+  const parts = addon.readPackage(source);
+  const workbook = findPackagePart(parts, WORKBOOK_PART);
+  if (!workbook) return [];
+
+  const workbookXml = workbook.data.toString('utf8');
+  const rels = findPackagePart(parts, WORKBOOK_RELS_PART);
+  if (rels) {
+    const sheets = parseSheets(workbookXml, rels.data.toString('utf8'));
+    if (sheets.length > 0) return sheets.map((sheet) => sheet.name);
+  }
+
+  // Fallback for packages without usable rels: workbook order is the order of
+  // the <sheet> tags, which is what v1 (SheetJS) reported as well.
+  const names = [];
+  const re = /<sheet\b[^>]*>/g;
+  let match;
+  while ((match = re.exec(workbookXml)) !== null) {
+    const name = /\bname="([^"]*)"/.exec(match[0]);
+    if (name) names.push(unescapeXmlText(name[1]));
+  }
+  return names;
+}
+
+function packageSourceOf(prepared) {
+  return prepared.buffer !== undefined ? prepared.buffer : prepared.filepath;
+}
+
+/**
+ * Resolves a 0-based sheet index to a worksheet name.
+ * @private
+ */
+function sheetNameByIndex(prepared, sheetIndex) {
+  const names = sheetNamesFromPackage(packageSourceOf(prepared));
+  if (sheetIndex >= names.length) {
+    throw makeError(
+      'SHEET_INDEX_OUT_OF_RANGE',
+      `Sheet index ${sheetIndex} is out of range (${names.length} sheets available)`
+    );
+  }
+  return names[sheetIndex];
+}
+
+/**
+ * Returns the worksheet names of a workbook, in workbook order.
+ *
+ * Synchronous, exactly like the v1 API: it only parses the package's
+ * workbook.xml, so no sheet data is touched.
+ *
+ * @param {string|Buffer} input - File path, Buffer, or base64 string.
+ * @returns {string[]}
+ * @throws Error with a `code` property: INVALID_INPUT / FILE_NOT_FOUND /
+ *   NO_SHEETS / PARSE_ERROR.
+ */
+function getSheetNames(input) {
+  if (input === null || input === undefined || input === '') {
+    throw makeError('INVALID_INPUT', 'Input is required (filepath, Buffer, or base64 string)');
+  }
+  const prepared = prepareInput(input);
+  try {
+    const names = sheetNamesFromPackage(packageSourceOf(prepared));
+    if (names.length === 0) {
+      throw makeError('NO_SHEETS', 'Excel file has no sheets');
+    }
+    return names;
+  } catch (err) {
+    if (!err.code) err.code = 'PARSE_ERROR';
+    throw err;
+  }
+}
+
+/**
+ * Reads every worksheet and resolves to an object keyed by sheet name, each
+ * value being the sheet's rows (same shape as readTableAsJSON returns).
+ *
+ * Like the v1 API, `headerRow` / `skipRows` / `headerMap` apply to every sheet,
+ * and a sheet whose header row is missing (or that otherwise fails to key) is
+ * reported via console.warn and mapped to an empty array instead of failing
+ * the whole workbook.
+ *
+ * @param {string|Buffer} input - File path, Buffer, or base64 string.
+ * @param {Object} [options]
+ * @param {number} [options.headerRow=0] - Header row index (0-based).
+ * @param {number[]} [options.skipRows=[]] - Row indices to skip (0-based).
+ * @param {Object<string,string>} [options.headerMap={}] - Header renames.
+ * @returns {Promise<Object<string, Array<Object>>>}
+ */
+async function readAllSheetsAsJSON(input, options = {}) {
+  if (input === null || input === undefined || input === '') {
+    throw makeError('INVALID_INPUT', 'Input is required (filepath, Buffer, or base64 string)');
+  }
+  const opts = validateOptions(options);
+  const prepared = prepareInput(input, options.inputEncoding);
+
+  const names = sheetNamesFromPackage(packageSourceOf(prepared));
+  if (names.length === 0) {
+    throw makeError('NO_SHEETS', 'Excel file has no sheets');
+  }
+
+  const result = {};
+  for (const name of names) {
+    const sheetOpts = { ...opts, sheetName: name };
+    try {
+      const nativeResult = await runNative(prepared, sheetOpts);
+      result[name] = transformToRows(nativeResult, sheetOpts);
+    } catch (err) {
+      console.warn(`处理Sheet "${name}" 时出错:`, err && err.message ? err.message : err);
+      result[name] = [];
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -1037,11 +1201,18 @@ function readTableAsJSON(input, options = {}) {
     throw makeError('INVALID_INPUT', 'Input is required (filepath, Buffer, or base64 string)');
   }
 
-  const opts = validateOptions(options);
+  const validated = validateOptions(options);
   const prepared = prepareInput(input, options.inputEncoding);
 
   return (async () => {
     try {
+      // Legacy compatibility: options.sheetIndex selects the sheet by position
+      // (0-based) and loses to an explicit sheetName. The native reader only
+      // ever loads one sheet, so the index is resolved to a name first.
+      let opts = validated;
+      if (opts.sheetIndex !== null && opts.sheetIndex !== undefined && opts.sheetName === null) {
+        opts = { ...opts, sheetName: sheetNameByIndex(prepared, opts.sheetIndex) };
+      }
       if (opts.onBatch) {
         return await readStreamed(prepared, opts);
       }
@@ -1058,6 +1229,8 @@ function readTableAsJSON(input, options = {}) {
 
 module.exports = {
   readTableAsJSON,
+  readAllSheetsAsJSON,
+  getSheetNames,
   writeTableAsJSON,
   updateCells,
   renderTemplate

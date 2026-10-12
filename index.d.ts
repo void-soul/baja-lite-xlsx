@@ -28,6 +28,12 @@ declare module 'baja-lite-xlsx' {
     /** Sheet to read; defaults to the first sheet. */
     sheetName?: string;
 
+    /**
+     * Sheet to read by position (0-based, workbook order). Lower priority
+     * than `sheetName`; defaults to the first sheet when neither is given.
+     */
+    sheetIndex?: number;
+
     /** Header row index (0-based, non-negative). Default: 0 */
     headerRow?: number;
 
@@ -146,8 +152,9 @@ declare module 'baja-lite-xlsx' {
    *
    * All cell values are strings; a cell holding pictures contains an
    * ImageDataObject (or an array of them when several images attach to the
-   * same cell). Pass `values: 'typed'` (with `engine: 'xml'`) to get real
-   * numbers, booleans and `Date` objects instead.
+   * same cell). String values are trimmed (leading/trailing whitespace), which
+   * matches the v1 behavior. Pass `values: 'typed'` (with `engine: 'xml'`) to
+   * get real numbers, booleans and `Date` objects instead.
    *
    * Invalid arguments throw synchronously; parse failures reject. Parsing runs
    * on the libuv thread pool, so the event loop is not blocked.
@@ -171,6 +178,82 @@ declare module 'baja-lite-xlsx' {
     input: string | Buffer,
     options?: ReadTableOptions
   ): Promise<ReadTableRow[]>;
+
+  /** Options for `readAllSheetsAsJSON` (applied to every sheet). */
+  export interface ReadAllSheetsOptions {
+    /** Header row index (0-based, non-negative). Default: 0 */
+    headerRow?: number;
+
+    /** Row indices to skip (0-based, non-negative). */
+    skipRows?: number[];
+
+    /** Header mapping from the original header text to the output property name. */
+    headerMap?: Record<string, string>;
+
+    /**
+     * Force how a string input is interpreted. Currently only 'base64'.
+     */
+    inputEncoding?: 'base64';
+
+    /**
+     * Cap on rows read per sheet (0 = no cap beyond the format maximum).
+     */
+    maxRows?: number;
+
+    /** Cap on columns read per sheet (0 = no cap beyond the format maximum). */
+    maxCols?: number;
+
+    /**
+     * When false the image pipeline is skipped entirely. Default: true.
+     */
+    includeImages?: boolean;
+
+    /**
+     * Read only these columns, given as header texts ("Amount") or Excel
+     * references ("B", "C:E"). An empty array means all columns.
+     */
+    columns?: string[];
+
+    /**
+     * How the worksheet is read. `"xlnt"` (default) or `"xml"` (direct read
+     * from the package). Both engines return exactly the same rows.
+     */
+    engine?: 'xlnt' | 'xml';
+
+    /**
+     * `"typed"` turns numbers, booleans and dates into real JS values instead
+     * of formatted strings. Requires `engine: 'xml'`. Default: `"string"`.
+     */
+    values?: 'string' | 'typed';
+  }
+
+  /**
+   * Reads every worksheet and resolves to an object keyed by sheet name, each
+   * value holding that sheet's rows (same row shape as `readTableAsJSON`).
+   *
+   * `headerRow` / `skipRows` / `headerMap` apply to every sheet. A sheet whose
+   * header row is missing (or that otherwise fails to key) is reported through
+   * `console.warn` and mapped to an empty array instead of failing the whole
+   * workbook.
+   *
+   * @throws Error with a `code` property: INVALID_INPUT / INVALID_OPTIONS /
+   *   FILE_NOT_FOUND / NO_SHEETS / PARSE_ERROR / READ_FAILED.
+   */
+  export function readAllSheetsAsJSON(
+    input: string | Buffer,
+    options?: ReadAllSheetsOptions
+  ): Promise<Record<string, ReadTableRow[]>>;
+
+  /**
+   * Returns the worksheet names of a workbook, in workbook order.
+   *
+   * Synchronous (like the v1 API): only the package's workbook.xml is parsed,
+   * so no sheet data is touched.
+   *
+   * @throws Error with a `code` property: INVALID_INPUT / FILE_NOT_FOUND /
+   *   NO_SHEETS / PARSE_ERROR.
+   */
+  export function getSheetNames(input: string | Buffer): string[];
 
   /** Per-column configuration for `writeTableAsJSON`. */
   export interface WriteColumnOptions {
